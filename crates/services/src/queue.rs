@@ -8,6 +8,7 @@ use brancher_core::{Job, JobResult, RepoId};
 use brancher_git::{CancelToken, Git};
 
 use crate::execute;
+use crate::watch::{self, Activity, RepoWatcher};
 
 /// Будит UI, когда готов результат (в приложении — `ctx.request_repaint()`).
 pub type Repaint = Arc<dyn Fn() + Send + Sync>;
@@ -19,6 +20,8 @@ struct Worker {
     tx: Sender<Job>,
     cancel: CancelToken,
     handle: Option<JoinHandle<()>>,
+    /// `None` — наблюдение недоступно (например, исчерпан лимит inotify); остаётся F5.
+    _watcher: Option<RepoWatcher>,
 }
 
 /// Очереди задач всех открытых репозиториев.
@@ -48,6 +51,17 @@ impl Jobs {
         }
         let (tx, rx) = mpsc::channel::<Job>();
         let cancel = CancelToken::new();
+        let activity = Arc::new(Activity::new());
+        let watcher = watch::start(
+            self.git.clone(),
+            path.clone(),
+            id,
+            self.results_tx.clone(),
+            self.repaint.clone(),
+            activity.clone(),
+        )
+        .map_err(|e| eprintln!("наблюдение за {} недоступно: {e}", path.display()))
+        .ok();
         let (git, out, repaint, c) = (
             self.git.clone(),
             self.results_tx.clone(),
@@ -61,11 +75,13 @@ impl Jobs {
                     if c.is_cancelled() {
                         break;
                     }
-                    // TODO: схлопывать подряд идущие Refresh и вынести чтения в общий пул (раздел 3).
+                    // TODO: вынести чтения в общий пул (раздел 3).
+                    activity.begin();
                     execute(&git, &path, &job, &c, &mut |r| {
                         let _ = out.send((id, r));
                         repaint();
                     });
+                    activity.end();
                 }
             })
             .expect("не удалось создать поток");
@@ -75,6 +91,7 @@ impl Jobs {
                 tx,
                 cancel,
                 handle: Some(handle),
+                _watcher: watcher,
             },
         );
     }
@@ -167,6 +184,39 @@ mod tests {
 
         jobs.stop_repo(id);
         assert!(!jobs.spawn(id, Job::Refresh { history_limit: 1 }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_changes_are_reported_except_ignored_ones() {
+        let dir = std::env::temp_dir().join(format!("brancher-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(dir.join(".gitignore"), "build/\n").unwrap();
+
+        let mut jobs = Jobs::new(Git::detect().unwrap().0, Arc::new(|| {}));
+        let id = RepoId(7);
+        jobs.start_repo(id, dir.clone());
+        // Даём наблюдателю запуститься и пропускаем события от создания репозитория.
+        std::thread::sleep(Duration::from_millis(500));
+        while jobs.recv_timeout(Duration::from_millis(800)).is_some() {}
+
+        std::fs::write(dir.join("build").join("out.o"), "x").unwrap();
+        assert_eq!(jobs.recv_timeout(Duration::from_secs(2)), None);
+
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        assert_eq!(
+            jobs.recv_timeout(Duration::from_secs(10)),
+            Some((id, JobResult::FilesChanged))
+        );
+
+        jobs.stop_repo(id);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

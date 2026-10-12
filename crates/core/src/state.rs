@@ -77,6 +77,8 @@ pub enum JobResult {
         target: DiffTarget,
         result: Result<Diff, JobError>,
     },
+    /// Файлы репозитория изменились снаружи (редактор, терминал) — нужно обновиться.
+    FilesChanged,
     /// Задача завершена (после этого счётчик занятости уменьшается).
     Finished {
         job: &'static str,
@@ -201,6 +203,8 @@ pub struct RepoState {
     pub amend: bool,
     /// Сколько задач сейчас выполняется.
     pub busy: u32,
+    /// Файлы менялись, пока шли задачи: обновиться, когда очередь опустеет.
+    pub stale: bool,
     /// Растёт при каждом изменении данных — ключ кешей UI (раздел 3).
     pub version: u64,
 }
@@ -650,11 +654,13 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
             // Результат для уже закрытой или сменённой цели не нужен.
             if r.diff_target.as_ref() == Some(&target) {
                 match result {
-                    Ok(d) => {
-                        // Номера строк в новом diff другие — выделение больше не валидно.
+                    // Номера строк в новом diff другие — выделение больше не валидно.
+                    // Тот же diff (обновление без изменений в файле) выделение сохраняет.
+                    Ok(d) if r.diff.as_ref() != Some(&d) => {
                         r.diff = Some(d);
                         r.clear_selection();
                     }
+                    Ok(_) => {}
                     Err(e) => {
                         r.close_diff();
                         error = Some(("Не удалось получить diff".to_owned(), e));
@@ -664,6 +670,18 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
         }
         JobResult::Status(Err(e)) | JobResult::Refs(Err(e)) | JobResult::History(Err(e)) => {
             error = Some(("Не удалось прочитать репозиторий".to_owned(), e))
+        }
+        JobResult::FilesChanged => {
+            // Пока идут задачи, обновление отложено: после них оно и так будет или его
+            // запустит флаг `stale`. Так подряд идущие изменения не копят очередь Refresh.
+            if r.busy == 0 {
+                effects.push(Effect::Spawn {
+                    repo,
+                    job: Job::Refresh { history_limit: limit },
+                });
+            } else {
+                r.stale = true;
+            }
         }
         JobResult::Finished { job, result } => {
             r.busy = r.busy.saturating_sub(1);
@@ -683,6 +701,24 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
                     }
                 }
                 Err(e) => error = Some((format!("Ошибка: git {job}"), e)),
+            }
+            let refreshing = effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::Spawn {
+                        job: Job::Refresh { .. },
+                        ..
+                    }
+                )
+            });
+            if r.stale && (refreshing || r.busy == 0) {
+                r.stale = false;
+                if !refreshing {
+                    effects.push(Effect::Spawn {
+                        repo,
+                        job: Job::Refresh { history_limit: limit },
+                    });
+                }
             }
         }
     }
@@ -1194,5 +1230,69 @@ mod tests {
                 job: Job::Stage(vec!["a.txt".into(), "c.txt".into()])
             }]
         );
+    }
+
+    fn is_refresh(fx: &[Effect]) -> bool {
+        matches!(
+            fx,
+            [Effect::Spawn {
+                job: Job::Refresh { .. },
+                ..
+            }]
+        )
+    }
+
+    #[test]
+    fn files_changed_refreshes_when_idle_and_waits_for_running_jobs() {
+        let mut s = AppState::new();
+        let id = open(&mut s, "/a");
+        assert!(is_refresh(&apply_result(&mut s, id, JobResult::FilesChanged)));
+
+        // Идёт refresh: второй не ставим, а запоминаем, что данные устарели.
+        job_started(&mut s, id);
+        assert!(apply_result(&mut s, id, JobResult::FilesChanged).is_empty());
+        assert!(apply_result(&mut s, id, JobResult::FilesChanged).is_empty());
+        let done = |s: &mut AppState, job| apply_result(s, id, JobResult::Finished { job, result: Ok(()) });
+        assert!(is_refresh(&done(&mut s, "refresh")));
+        assert!(!s.active_repo().unwrap().stale);
+
+        // После stage refresh будет и так — лишний не добавляется.
+        job_started(&mut s, id);
+        apply_result(&mut s, id, JobResult::FilesChanged);
+        assert!(is_refresh(&done(&mut s, "stage")));
+        assert!(!s.active_repo().unwrap().stale);
+    }
+
+    #[test]
+    fn same_diff_after_refresh_keeps_selection() {
+        let (mut s, id) = with_change_diff(false);
+        reduce(
+            &mut s,
+            Action::SelectDiffLine {
+                file: 0,
+                hunk: 0,
+                line: 1,
+                extend: false,
+                toggle: false,
+            },
+        );
+        let r = s.active_repo().unwrap();
+        let (target, diff) = (r.diff_target.clone().unwrap(), r.diff.clone().unwrap());
+        let reload = |s: &mut AppState, d: Diff| {
+            apply_result(
+                s,
+                id,
+                JobResult::Diff {
+                    target: target.clone(),
+                    result: Ok(d),
+                },
+            );
+        };
+        reload(&mut s, diff.clone());
+        assert_eq!(s.active_repo().unwrap().diff_selection.len(), 1);
+        let mut changed = diff;
+        changed.files[0].hunks[0].lines[0].text = "a2".into();
+        reload(&mut s, changed);
+        assert!(s.active_repo().unwrap().diff_selection.is_empty());
     }
 }
