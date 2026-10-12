@@ -96,12 +96,21 @@ fn selection_controls(ui: &mut Ui, repo: &RepoState, target: &DiffTarget, action
         return;
     }
     let verb = if staged { "Unstage" } else { "Stage" };
+    // Справа налево: сначала основная кнопка, левее — отмена строк.
     let button = ui
         .add(widgets::Button::new(format!("{verb} строки ({n})")).size(widgets::ButtonSize::Sm))
         .on_hover_text("S");
     let key = ui.memory(|m| m.focused().is_none()) && ui.input(|i| i.key_pressed(egui::Key::S));
     if button.clicked() || key {
         actions.push(Action::ApplyDiffSelection);
+    }
+    if !staged {
+        let discard = ui
+            .add(widgets::Button::outline("Отменить строки").size(widgets::ButtonSize::Sm))
+            .on_hover_text("Удалить выбранные изменения из рабочей копии");
+        if discard.clicked() {
+            actions.push(Action::DiscardDiffSelection);
+        }
     }
 }
 
@@ -167,8 +176,18 @@ fn rows(ui: &mut Ui, repo: &RepoState, diff: &Diff, actions: &mut Vec<Action>) {
                             } else {
                                 "Stage ханк"
                             };
-                            if link(ui, &painter, pos2(text.right() + 16.0, y), label, (f, h), &theme) {
+                            let at = pos2(text.right() + 16.0, y);
+                            let (clicked, right) = link(ui, &painter, at, label, (f, h, "apply"), &theme);
+                            if clicked {
                                 actions.push(Action::ApplyHunk { file: f, hunk: h });
+                            }
+                            if !staged {
+                                let at = pos2(right + 8.0, y);
+                                let (clicked, _) =
+                                    link(ui, &painter, at, "Отменить ханк", (f, h, "discard"), &theme);
+                                if clicked {
+                                    actions.push(Action::DiscardHunk { file: f, hunk: h });
+                                }
                             }
                         }
                     }
@@ -239,9 +258,9 @@ fn link(
     painter: &egui::Painter,
     at: egui::Pos2,
     text: &str,
-    id: (usize, usize),
+    id: (usize, usize, &str),
     theme: &Theme,
-) -> bool {
+) -> (bool, f32) {
     let font = FontId::proportional(12.0);
     let galley = painter.layout_no_wrap(text.to_owned(), font, theme.foreground);
     let rect =
@@ -266,7 +285,7 @@ fn link(
         galley,
         theme.foreground,
     );
-    response.clicked()
+    (response.clicked(), rect.right())
 }
 
 fn file_row(painter: &egui::Painter, rect: Rect, file: &FileDiff, theme: &Theme) {

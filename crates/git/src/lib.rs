@@ -90,15 +90,17 @@ impl Git {
         self.run_args(repo, &args, None, cancel)
     }
 
-    /// Применяет patch к индексу (`reverse` — снимает его). Patch идёт через stdin.
-    pub fn apply_cached(
+    /// Применяет patch к индексу (`cached`) или к рабочему дереву; `reverse` — откатывает его.
+    /// Patch идёт через stdin.
+    pub fn apply(
         &self,
         repo: &Path,
         patch: &str,
+        cached: bool,
         reverse: bool,
         cancel: &CancelToken,
     ) -> Result<(), GitError> {
-        let args = commands::apply::args(reverse);
+        let args = commands::apply::args(cached, reverse);
         self.run_args(repo, &args, Some(patch.as_bytes()), cancel)
     }
 

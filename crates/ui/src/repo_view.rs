@@ -7,6 +7,20 @@ use egui::{RichText, Ui};
 const ROW_HEIGHT: f32 = 24.0;
 
 pub fn show(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
+    if let Some(c) = &repo.confirm {
+        let answer = widgets::confirm_dialog(
+            ui.ctx(),
+            "confirm",
+            &c.title,
+            &c.description,
+            &c.action,
+            "Отмена",
+            true,
+        );
+        if let Some(yes) = answer {
+            actions.push(Action::Confirm(yes));
+        }
+    }
     toolbar(ui, repo, actions);
     ui.separator();
     let height = ui.available_height();

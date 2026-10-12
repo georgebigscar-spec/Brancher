@@ -226,13 +226,13 @@ fn partial_stage_and_unstage_by_lines() {
         .position(|l| l.kind == LineKind::Added && l.text == "e")
         .unwrap();
     let p = patch::build(&d[0], &BTreeSet::from([(0, e)]), false).unwrap();
-    g.apply_cached(repo.path(), &p, false, &c).unwrap();
+    g.apply(repo.path(), &p, true, false, &c).unwrap();
     assert_eq!(cached(&g), "a\r\nb\r\nc\r\nd\r\ne\r\n");
 
     // Теперь индексируем b → B ханком целиком и снимаем из индекса только e.
     let d = g.diff(repo.path(), &target(false), &c).unwrap();
     let p = patch::build(&d[0], &patch::hunk_lines(&d[0], 0), false).unwrap();
-    g.apply_cached(repo.path(), &p, false, &c).unwrap();
+    g.apply(repo.path(), &p, true, false, &c).unwrap();
     assert_eq!(cached(&g), "a\r\nB\r\nc\r\nd\r\ne\r\n");
 
     let d = g.diff(repo.path(), &target(true), &c).unwrap();
@@ -242,8 +242,21 @@ fn partial_stage_and_unstage_by_lines() {
         .position(|l| l.kind == LineKind::Added && l.text == "e")
         .unwrap();
     let p = patch::build(&d[0], &BTreeSet::from([(0, e)]), true).unwrap();
-    g.apply_cached(repo.path(), &p, true, &c).unwrap();
+    g.apply(repo.path(), &p, true, true, &c).unwrap();
     assert_eq!(cached(&g), "a\r\nB\r\nc\r\nd\r\n");
+
+    // Discard: в индексе a B c d, в рабочем дереве ещё и e — откатываем e в рабочем дереве.
+    let d = g.diff(repo.path(), &target(false), &c).unwrap();
+    let lines = &d[0].hunks[0].lines;
+    let e = lines
+        .iter()
+        .position(|l| l.kind == LineKind::Added && l.text == "e")
+        .unwrap();
+    let p = patch::build(&d[0], &BTreeSet::from([(0, e)]), true).unwrap();
+    g.apply(repo.path(), &p, false, true, &c).unwrap();
+    let work = std::fs::read_to_string(repo.path().join("f.txt")).unwrap();
+    assert_eq!(work, "a\r\nB\r\nc\r\nd\r\n");
+    assert!(g.diff(repo.path(), &target(false), &c).unwrap().is_empty());
 
     // Untracked: в индекс попадает только выбранная строка нового файла.
     repo.write("new.txt", "one\ntwo\n");
@@ -254,7 +267,7 @@ fn partial_stage_and_unstage_by_lines() {
     };
     let d = g.diff(repo.path(), &untracked, &c).unwrap();
     let p = patch::build(&d[0], &BTreeSet::from([(0, 1)]), false).unwrap();
-    g.apply_cached(repo.path(), &p, false, &c).unwrap();
+    g.apply(repo.path(), &p, true, false, &c).unwrap();
     let out = g
         .runner
         .run(Some(repo.path()), &["show", ":new.txt"], None, &c)
