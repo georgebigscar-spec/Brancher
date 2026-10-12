@@ -101,11 +101,23 @@ pub enum DiffRow {
     Line(usize, usize, usize),
 }
 
+/// Строка side-by-side режима: слева старая версия, справа новая.
+/// Удалённые и добавленные строки одного блока стоят друг напротив друга.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitRow {
+    File(usize),
+    Hunk(usize, usize),
+    /// `(файл, ханк, строка слева, строка справа)`; у контекста обе стороны — одна строка.
+    Pair(usize, usize, Option<usize>, Option<usize>),
+}
+
 /// Загруженный diff вместе с плоским списком строк для показа.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Diff {
     pub files: Vec<FileDiff>,
     pub rows: Vec<DiffRow>,
+    /// Те же строки для side-by-side режима.
+    pub split_rows: Vec<SplitRow>,
     /// Самая длинная строка кода в символах — ширина для горизонтальной прокрутки.
     pub max_line_len: usize,
 }
@@ -127,12 +139,65 @@ impl Diff {
             .map(|l| display_width(&l.text))
             .max()
             .unwrap_or(0);
+        let split_rows = split_rows(&files);
         Self {
             files,
             rows,
+            split_rows,
             max_line_len,
         }
     }
+}
+
+fn split_rows(files: &[FileDiff]) -> Vec<SplitRow> {
+    let mut rows = vec![];
+    for (f, file) in files.iter().enumerate() {
+        rows.push(SplitRow::File(f));
+        for (h, hunk) in file.hunks.iter().enumerate() {
+            rows.push(SplitRow::Hunk(f, h));
+            // Подряд идущие удалённые и добавленные строки — один блок замены.
+            let (mut removed, mut added) = (vec![], vec![]);
+            let flush = |rows: &mut Vec<SplitRow>, removed: &mut Vec<usize>, added: &mut Vec<usize>| {
+                for i in 0..removed.len().max(added.len()) {
+                    rows.push(SplitRow::Pair(
+                        f,
+                        h,
+                        removed.get(i).copied(),
+                        added.get(i).copied(),
+                    ));
+                }
+                removed.clear();
+                added.clear();
+            };
+            let mut last = LineKind::Context;
+            for (l, line) in hunk.lines.iter().enumerate() {
+                match line.kind {
+                    LineKind::Removed => {
+                        if !added.is_empty() {
+                            flush(&mut rows, &mut removed, &mut added);
+                        }
+                        removed.push(l);
+                    }
+                    LineKind::Added => added.push(l),
+                    // Маркер «нет перевода строки» относится к стороне предыдущей строки.
+                    LineKind::NoNewline => match last {
+                        LineKind::Removed => removed.push(l),
+                        LineKind::Added => added.push(l),
+                        _ => rows.push(SplitRow::Pair(f, h, Some(l), Some(l))),
+                    },
+                    LineKind::Context => {
+                        flush(&mut rows, &mut removed, &mut added);
+                        rows.push(SplitRow::Pair(f, h, Some(l), Some(l)));
+                    }
+                }
+                if line.kind != LineKind::NoNewline {
+                    last = line.kind;
+                }
+            }
+            flush(&mut rows, &mut removed, &mut added);
+        }
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -180,6 +245,37 @@ mod tests {
                 R::Hunk(0, 1),
                 R::Line(0, 1, 0),
                 R::File(1)
+            ]
+        );
+    }
+
+    #[test]
+    fn split_rows_pair_removed_with_added() {
+        use LineKind::*;
+        let kinds = [Context, Removed, Removed, Added, Context, Added, NoNewline];
+        let d = Diff::new(vec![FileDiff {
+            hunks: vec![Hunk {
+                header: "@@".into(),
+                old_start: 1,
+                old_count: 4,
+                new_start: 1,
+                new_count: 4,
+                lines: kinds.iter().map(|k| line(*k)).collect(),
+            }],
+            ..Default::default()
+        }]);
+        use SplitRow as S;
+        assert_eq!(
+            d.split_rows,
+            [
+                S::File(0),
+                S::Hunk(0, 0),
+                S::Pair(0, 0, Some(0), Some(0)),
+                S::Pair(0, 0, Some(1), Some(3)),
+                S::Pair(0, 0, Some(2), None),
+                S::Pair(0, 0, Some(4), Some(4)),
+                S::Pair(0, 0, None, Some(5)),
+                S::Pair(0, 0, None, Some(6)),
             ]
         );
     }

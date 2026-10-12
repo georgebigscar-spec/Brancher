@@ -39,7 +39,7 @@ impl BrancherUi {
                 notifications(ui, state, &mut actions);
                 match state.active_repo() {
                     None => welcome::show(ui, state, &mut self.open_path, &mut actions),
-                    Some(repo) => repo_view::show(ui, repo, &mut actions),
+                    Some(repo) => repo_view::show(ui, repo, &state.settings, &mut actions),
                 }
             });
         shortcuts(&ctx, state, &mut actions);

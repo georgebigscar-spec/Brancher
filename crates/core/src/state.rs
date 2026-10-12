@@ -134,6 +134,7 @@ pub enum Action {
     SetAmend(bool),
     Commit,
     DismissNotification(usize),
+    SetSideBySide(bool),
 }
 
 /// Побочный эффект, который должен выполнить слой services.
@@ -342,7 +343,15 @@ pub struct AppState {
     pub recent: Vec<RepoEntry>,
     pub notifications: Vec<Notification>,
     pub history_limit: usize,
+    pub settings: Settings,
     next_id: u64,
+}
+
+/// Настройки пользователя, общие для всех вкладок.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Settings {
+    /// Diff в две колонки вместо одной.
+    pub side_by_side: bool,
 }
 
 impl AppState {
@@ -440,6 +449,10 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 other => other,
             };
             vec![Effect::StopRepo(repo.id())]
+        }
+        Action::SetSideBySide(on) => {
+            state.settings.side_by_side = on;
+            vec![]
         }
         Action::DismissNotification(i) => {
             if i < state.notifications.len() {
