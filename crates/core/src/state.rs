@@ -1564,7 +1564,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                         repo.confirm = Some(Confirm {
                             title: format!("Удалить слитые ветки ({})?", names.len()),
                             description: format!(
-                                "Все их коммиты уже есть в {trunk}:\n{}\n\nВернуть можно через «История», кнопка «Отменить».",
+                                "Их изменения уже есть в {trunk}:\n{}\n\nВернуть можно через «История», кнопка «Отменить».",
                                 bullet_list(&names)
                             ),
                             action: "Удалить".into(),

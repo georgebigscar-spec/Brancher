@@ -16,8 +16,12 @@ use std::path::{Path, PathBuf};
 
 use brancher_core::{
     AbsorbReport, Blame, Commit, DiffTarget, FileDiff, GitRef, Operation, Progress, RebaseAction, RebaseStep,
-    Remote, RepoStatus, Snapshot, Stash,
+    RefKind, Remote, RepoStatus, Snapshot, Stash,
 };
+
+/// Сколько веток и коммитов основной ветки проверять на squash-слияние при обновлении.
+const SQUASH_CHECK_BRANCHES: usize = 30;
+const SQUASH_CHECK_COMMITS: usize = 300;
 
 /// Высокоуровневые операции поверх [`Runner`].
 #[derive(Debug, Clone)]
@@ -290,7 +294,24 @@ impl Git {
             "GIT_SEQUENCE_EDITOR".into(),
             commands::rebase::sequence_editor().into(),
         ));
-        git.start_operation(repo, &commands::rebase::start_args(base), cancel)
+        // `--autostash` возвращает изменения без индекса: запоминаем проиндексированное
+        // и после rebase индексируем его снова, если патч ещё применяется.
+        let staged = self
+            .runner
+            .run(
+                Some(repo),
+                &["diff", "--cached", "--binary", "--no-color", "--no-ext-diff"],
+                None,
+                cancel,
+            )?
+            .stdout;
+        git.start_operation(repo, &commands::rebase::start_args(base), cancel)?;
+        if !staged.is_empty() && self.status(repo, cancel)?.operation.is_none() {
+            let _ = self
+                .runner
+                .run(Some(repo), &["apply", "--cached", "-"], Some(&staged), cancel);
+        }
+        Ok(())
     }
 
     /// Отменяет коммит, оставляя его изменения незакоммиченными (в индексе).
@@ -564,8 +585,62 @@ impl Git {
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             let out = self.runner.run(Some(repo), &args, None, cancel)?;
             commands::refs::mark_merged(&mut refs, &out.stdout);
+            // Ветки, слитые через squash: их суммарный diff совпадает с одним коммитом основной.
+            let candidates: Vec<usize> = (0..refs.len())
+                .filter(|&i| {
+                    let r = &refs[i];
+                    r.kind == RefKind::LocalBranch && !r.merged && r.full_name != trunk
+                })
+                .take(SQUASH_CHECK_BRANCHES)
+                .collect();
+            for i in candidates {
+                // Ошибка проверки не мешает показать ветки.
+                if self
+                    .squash_merged(repo, &trunk, &refs[i].full_name, cancel)
+                    .unwrap_or(false)
+                {
+                    refs[i].merged = true;
+                }
+            }
         }
         Ok(refs)
+    }
+
+    /// Изменения ветки целиком (от общего предка) уже есть в `trunk` одним коммитом.
+    fn squash_merged(
+        &self,
+        repo: &Path,
+        trunk: &str,
+        branch: &str,
+        cancel: &CancelToken,
+    ) -> Result<bool, GitError> {
+        let run = |args: &[&str], input: Option<&[u8]>| self.runner.run(Some(repo), args, input, cancel);
+        let base = run(&["merge-base", trunk, branch], None)?
+            .stdout_lossy()
+            .trim()
+            .to_owned();
+        let range = format!("{base}..{trunk}");
+        let count: usize = run(&["rev-list", "--count", "--no-merges", &range], None)?
+            .stdout_lossy()
+            .trim()
+            .parse()
+            .unwrap_or(0);
+        if count == 0 || count > SQUASH_CHECK_COMMITS {
+            return Ok(false);
+        }
+        let diff = run(&["diff", "--no-color", "--no-ext-diff", &base, branch], None)?.stdout;
+        if diff.is_empty() {
+            return Ok(false);
+        }
+        let own = commands::refs::parse_patch_ids(&run(&["patch-id", "--stable"], Some(&diff))?.stdout);
+        let Some(own) = own.first() else { return Ok(false) };
+        let log = run(
+            &["log", "-p", "--no-merges", "--no-color", "--no-ext-diff", &range],
+            None,
+        )?
+        .stdout;
+        let ids = commands::refs::parse_patch_ids(&run(&["patch-id", "--stable"], Some(&log))?.stdout);
+        Ok(ids.contains(own))
     }
 
     /// История всех веток (`--all`); в пустом репозитории — пустой список.

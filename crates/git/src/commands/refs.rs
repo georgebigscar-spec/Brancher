@@ -89,6 +89,14 @@ pub fn mark_merged(refs: &mut [GitRef], out: &[u8]) {
     }
 }
 
+/// Первые поля вывода `git patch-id` (сами patch-id).
+pub fn parse_patch_ids(out: &[u8]) -> Vec<String> {
+    utf8(out)
+        .lines()
+        .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
+        .collect()
+}
+
 fn split_fields(line: &[u8]) -> Vec<String> {
     // Поля могут быть пустыми, поэтому общий split_nul (отбрасывающий пустые) здесь не подходит.
     let line = line.strip_suffix(b"\0").unwrap_or(line);
@@ -114,6 +122,12 @@ fn parse_track(s: &str) -> (u32, u32, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_patch_ids() {
+        assert_eq!(parse_patch_ids(b"p1 c1\np2 c2\n"), ["p1", "p2"]);
+        assert!(parse_patch_ids(b"").is_empty());
+    }
 
     #[test]
     fn marks_merged_branches_except_trunk_and_fresh_ones() {
