@@ -947,3 +947,58 @@ fn commit_editing_uncommit_amend_into_and_uncommit_file() {
     staged.sort();
     assert_eq!(staged, ["a.txt", "b.txt"]);
 }
+
+#[test]
+fn absorb_moves_staged_hunks_into_branch_commits() {
+    let repo = TempRepo::new("absorb");
+    let (g, c) = (git(), CancelToken::new());
+    let p = repo.path();
+    let show = |rev: &str| -> String {
+        let out = Command::new("git")
+            .args(["show", rev])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let commit = |files: &[(&str, &str)], msg: &str| {
+        for (f, t) in files {
+            repo.write(f, t);
+            g.stage(p, &[(*f).into()], &c).unwrap();
+        }
+        g.commit(p, msg, false, &c).unwrap();
+    };
+    commit(&[("f.txt", "1\n2\n3\n4\n5\n6\n"), ("g.txt", "g1\n")], "base");
+    g.create_branch(p, "feature", "main", true, &c).unwrap();
+    commit(&[("f.txt", "1\nTWO\n3\n4\n5\n6\n")], "change two");
+    commit(&[("g.txt", "g1\ng2\n")], "add g2");
+    commit(&[("h.txt", "h\n")], "add h");
+
+    // Нечего раскладывать: изменённая строка из коммита main.
+    repo.write("f.txt", "1\nTWO\n3\n4\nFIVE\n6\n");
+    g.stage(p, &["f.txt".into()], &c).unwrap();
+    assert!(g.absorb(p, &c).is_err());
+
+    repo.write("f.txt", "1\nTWO!\n3\n4\nFIVE\n6\n");
+    repo.write("g.txt", "g1\ng2\ng3\n");
+    g.stage(p, &["f.txt".into(), "g.txt".into()], &c).unwrap();
+    repo.write("h.txt", "h-unstaged\n");
+    let report = g.absorb(p, &c).unwrap();
+    assert_eq!((report.hunks, report.commits, report.left), (2, 2, 1));
+
+    let subjects: Vec<String> = g.log(p, 20, &c).unwrap().into_iter().map(|c| c.subject).collect();
+    assert_eq!(subjects, ["add h", "add g2", "change two", "base"]);
+    assert!(show("HEAD~2").contains("+TWO!\n"));
+    assert!(show("HEAD~1").contains("+g3\n"));
+    assert!(!show("HEAD").contains("FIVE"));
+    assert_eq!(fs::read_to_string(p.join("h.txt")).unwrap(), "h-unstaged\n");
+    assert_eq!(
+        fs::read_to_string(p.join("f.txt")).unwrap(),
+        "1\nTWO!\n3\n4\nFIVE\n6\n"
+    );
+    let st = g.status(p, &c).unwrap();
+    assert!(st.operation.is_none());
+    let mut changed: Vec<_> = st.changes.iter().map(|c| c.path.clone()).collect();
+    changed.sort();
+    assert_eq!(changed, ["f.txt", "h.txt"]);
+}

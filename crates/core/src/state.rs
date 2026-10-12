@@ -142,6 +142,8 @@ pub enum Job {
     },
     /// Убрать файл из последнего коммита в рабочую копию.
     UncommitFile(String),
+    /// Разложить проиндексированное по коммитам ветки, которые меняли эти строки.
+    Absorb,
     /// Список снимков ленты отмены.
     Snapshots,
     /// Вернуть репозиторий к снимку.
@@ -216,6 +218,7 @@ impl Job {
             Job::Uncommit { .. } => "uncommit",
             Job::AmendInto { .. } => "amend into",
             Job::UncommitFile(_) => "uncommit file",
+            Job::Absorb => "absorb",
             Job::Restore { .. } => "restore",
             Job::Continue(op) => match op {
                 Operation::Merge => "merge --continue",
@@ -271,6 +274,7 @@ impl Job {
             Job::Uncommit { commit, .. } => format!("Отмена коммита {}", short(commit)),
             Job::AmendInto { commit, .. } => format!("Изменения в коммит {}", short(commit)),
             Job::UncommitFile(path) => format!("Файл {path} из коммита"),
+            Job::Absorb => "Absorb".into(),
             Job::Continue(op) => format!("Продолжение {}", op.name()),
             Job::Abort(op) => format!("Прерывание {}", op.name()),
             Job::ResolveConflict { path, .. } => format!("Разрешение конфликта {path}"),
@@ -332,6 +336,8 @@ pub enum JobResult {
         result: Result<(Vec<Commit>, Vec<Commit>), JobError>,
     },
     Snapshots(Result<Vec<Snapshot>, JobError>),
+    /// Absorb выполнен (ошибка приходит в [`JobResult::Finished`]).
+    Absorbed(AbsorbReport),
     /// Файлы репозитория изменились снаружи (редактор, терминал) — нужно обновиться.
     FilesChanged,
     /// Этап сетевой задачи репозитория (fetch, pull, push).
@@ -507,6 +513,8 @@ pub enum Action {
     AmendInto(Oid),
     /// Убрать файл из последнего коммита.
     UncommitFile(String),
+    /// Разложить проиндексированное по коммитам ветки (absorb).
+    Absorb,
     /// Открыть ленту отмены.
     ShowOplog,
     CloseOplog,
@@ -1684,6 +1692,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 | Action::Uncommit(_)
                 | Action::AmendInto(_)
                 | Action::UncommitFile(_)
+                | Action::Absorb
                     if repo.operation().is_some() =>
                 {
                     let op = repo.operation().map_or("", Operation::name);
@@ -1865,6 +1874,27 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     }
                 }
                 Action::UncommitFile(path) => spawn(Job::UncommitFile(path)),
+                Action::Absorb => {
+                    let status = repo.status.as_ref();
+                    if status.is_some_and(|s| s.conflicts().next().is_some()) {
+                        state.notifications.push(Notification {
+                            severity: Severity::Info,
+                            title: "Absorb не выполнен".into(),
+                            details: "Сначала разрешите конфликты".into(),
+                        });
+                        vec![]
+                    } else if status.map_or(0, |s| s.staged().count()) == 0 {
+                        state.notifications.push(Notification {
+                            severity: Severity::Info,
+                            title: "Absorb не выполнен".into(),
+                            details: "Нет проиндексированных изменений: сначала сделайте stage нужных файлов или строк"
+                                .into(),
+                        });
+                        vec![]
+                    } else {
+                        spawn(Job::Absorb)
+                    }
+                }
                 Action::ShowOplog => {
                     repo.oplog = Some(None);
                     spawn(Job::Snapshots)
@@ -2036,6 +2066,21 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
             state.prompts.push_back(Prompt::new(id, text));
             return vec![];
         }
+        JobResult::Absorbed(r) => {
+            let mut details = format!("Фрагментов: {}, коммитов: {}.", r.hunks, r.commits);
+            if r.left > 0 {
+                details.push_str(&format!(
+                    " Не удалось отнести к коммиту ветки: {} — они остались в изменениях.",
+                    r.left
+                ));
+            }
+            state.notifications.push(Notification {
+                severity: Severity::Info,
+                title: "Изменения разложены по коммитам".into(),
+                details,
+            });
+            return vec![];
+        }
         // Другой `id` или нет `cloning` — клонирование отменили, результат не нужен.
         JobResult::Cloned { id, result } => {
             if !state.cloning.as_ref().is_some_and(|c| c.id == id) {
@@ -2189,7 +2234,10 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
         | JobResult::Stashes(Err(e))
         | JobResult::Remotes(Err(e))
         | JobResult::History(Err(e)) => error = Some(("Не удалось прочитать репозиторий".to_owned(), e)),
-        JobResult::CloneProgress { .. } | JobResult::Cloned { .. } | JobResult::Prompt { .. } => {
+        JobResult::CloneProgress { .. }
+        | JobResult::Cloned { .. }
+        | JobResult::Prompt { .. }
+        | JobResult::Absorbed(_) => {
             unreachable!("обработано выше")
         }
         JobResult::Progress(p) => r.progress = Some(p),
@@ -3820,6 +3868,46 @@ mod tests {
         assert!(!reloads(&finished(&mut s, "oplog")));
         reduce(&mut s, Action::CloseOplog);
         assert!(!reloads(&finished(&mut s, "commit")));
+    }
+
+    #[test]
+    fn absorb_needs_staged_changes_and_reports_result() {
+        let mut s = AppState::new();
+        let id = open(&mut s, "/a");
+        let status = |staged: Option<ChangeKind>| RepoStatus {
+            branch: Some("main".into()),
+            head: Some("c".into()),
+            changes: vec![Change {
+                path: "f".into(),
+                orig_path: None,
+                staged,
+                unstaged: Some(ChangeKind::Modified),
+            }],
+            ..Default::default()
+        };
+        apply_result(&mut s, id, JobResult::Status(Ok(status(None))));
+        assert!(reduce(&mut s, Action::Absorb).is_empty());
+        assert_eq!(s.notifications.len(), 1);
+        apply_result(
+            &mut s,
+            id,
+            JobResult::Status(Ok(status(Some(ChangeKind::Modified)))),
+        );
+        assert!(matches!(
+            &reduce(&mut s, Action::Absorb)[..],
+            [Effect::Spawn { job: Job::Absorb, .. }]
+        ));
+        apply_result(
+            &mut s,
+            id,
+            JobResult::Absorbed(AbsorbReport {
+                hunks: 3,
+                commits: 2,
+                left: 1,
+            }),
+        );
+        let n = s.notifications.last().unwrap();
+        assert!(n.details.contains("Фрагментов: 3, коммитов: 2") && n.details.contains(": 1"));
     }
 
     #[test]
