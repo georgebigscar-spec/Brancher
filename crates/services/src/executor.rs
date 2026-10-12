@@ -69,6 +69,17 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
                     .file_log(repo, path, brancher_core::FILE_HISTORY_LIMIT, cancel)
                     .map_err(Into::into),
             }),
+            Job::Compare { base, other } => {
+                let limit = brancher_core::FILE_HISTORY_LIMIT;
+                let result = git
+                    .log_range(repo, base, other, limit, cancel)
+                    .and_then(|theirs| Ok((theirs, git.log_range(repo, other, base, limit, cancel)?)));
+                emit(JobResult::Compare {
+                    base: base.clone(),
+                    other: other.clone(),
+                    result: result.map_err(Into::into),
+                })
+            }
             Job::CreateTag {
                 name,
                 target,

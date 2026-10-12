@@ -92,6 +92,11 @@ pub enum Job {
     },
     /// История коммитов одного файла.
     FileLog(String),
+    /// Коммиты, которые есть только в одной из двух ссылок.
+    Compare {
+        base: String,
+        other: String,
+    },
     /// Тег на `target`; непустое `message` — аннотированный тег.
     CreateTag {
         name: String,
@@ -142,7 +147,12 @@ impl Job {
     pub fn is_read(&self) -> bool {
         matches!(
             self,
-            Job::Refresh { .. } | Job::Diff(_) | Job::Blame { .. } | Job::FileLog(_) | Job::CommitMessage(_)
+            Job::Refresh { .. }
+                | Job::Diff(_)
+                | Job::Blame { .. }
+                | Job::FileLog(_)
+                | Job::CommitMessage(_)
+                | Job::Compare { .. }
         )
     }
 
@@ -154,7 +164,7 @@ impl Job {
             Job::Commit { .. } => "commit",
             Job::Diff(_) => "diff",
             Job::Blame { .. } => "blame",
-            Job::FileLog(_) => "log",
+            Job::FileLog(_) | Job::Compare { .. } => "log",
             Job::ApplyPatch { cached: false, .. } => "discard-lines",
             Job::ApplyPatch { reverse: false, .. } => "stage-lines",
             Job::ApplyPatch { reverse: true, .. } => "unstage-lines",
@@ -242,6 +252,12 @@ pub enum JobResult {
     CommitMessage {
         commit: Oid,
         result: Result<String, JobError>,
+    },
+    /// Коммиты только в `other` и только в `base`.
+    Compare {
+        base: String,
+        other: String,
+        result: Result<(Vec<Commit>, Vec<Commit>), JobError>,
     },
     /// Файлы репозитория изменились снаружи (редактор, терминал) — нужно обновиться.
     FilesChanged,
@@ -366,6 +382,10 @@ pub enum Action {
         rev: Option<Oid>,
     },
     ShowFileHistory(String),
+    /// Сравнить ссылку с текущей веткой: коммиты с каждой стороны.
+    CompareWith(String),
+    /// Diff сравнения: что принесёт ссылка (`HEAD...ссылка`).
+    ShowCompareDiff,
     CloseFileView,
     /// Строка поиска по истории: текст заголовка, автор или начало SHA.
     SetHistoryQuery(String),
@@ -533,12 +553,21 @@ pub enum FileView {
         path: String,
         commits: Option<Vec<Commit>>,
     },
+    /// Сравнение `other` с текущей веткой `base`; `None` — идёт загрузка.
+    Compare {
+        base: String,
+        other: String,
+        /// Коммиты только в `other` (их принесёт merge) и только в `base`.
+        only_other: Option<Vec<Commit>>,
+        only_base: Option<Vec<Commit>>,
+    },
 }
 
 impl FileView {
     pub fn path(&self) -> &str {
         match self {
             Self::Blame { path, .. } | Self::History { path, .. } => path,
+            Self::Compare { other, .. } => other,
         }
     }
 }
@@ -1468,6 +1497,32 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     });
                     spawn(Job::FileLog(path))
                 }
+                Action::CompareWith(other) => {
+                    let base = repo
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.branch.clone())
+                        .unwrap_or_else(|| "HEAD".into());
+                    repo.close_diff();
+                    repo.selected_commit = None;
+                    repo.file_view = Some(FileView::Compare {
+                        base: base.clone(),
+                        other: other.clone(),
+                        only_other: None,
+                        only_base: None,
+                    });
+                    spawn(Job::Compare { base, other })
+                }
+                Action::ShowCompareDiff => match repo.file_view.take() {
+                    Some(FileView::Compare { base, other, .. }) => repo.show_diff(DiffTarget::Range {
+                        from: base,
+                        to: other,
+                    }),
+                    other => {
+                        repo.file_view = other;
+                        vec![]
+                    }
+                },
                 Action::CloseFileView => {
                     repo.file_view = None;
                     vec![]
@@ -1856,6 +1911,31 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
                     Err(e) => {
                         r.file_view = None;
                         error = Some((format!("Не удалось получить историю {path}"), e));
+                    }
+                }
+            }
+        }
+        JobResult::Compare { base, other, result } => {
+            let shown = matches!(
+                &r.file_view,
+                Some(FileView::Compare { base: b, other: o, .. }) if *b == base && *o == other
+            );
+            if shown {
+                match result {
+                    Ok((theirs, ours)) => {
+                        if let Some(FileView::Compare {
+                            only_other,
+                            only_base,
+                            ..
+                        }) = &mut r.file_view
+                        {
+                            *only_other = Some(theirs);
+                            *only_base = Some(ours);
+                        }
+                    }
+                    Err(e) => {
+                        r.file_view = None;
+                        error = Some((format!("Не удалось сравнить {other} и {base}"), e));
                     }
                 }
             }
@@ -3384,5 +3464,60 @@ mod tests {
         });
         reduce(&mut s, Action::PlanRebase("c".into()));
         assert!(plan(&s).is_none());
+    }
+
+    #[test]
+    fn compare_with_current_branch() {
+        let (mut s, id) = with_branches();
+        apply_result(
+            &mut s,
+            id,
+            JobResult::Status(Ok(RepoStatus {
+                branch: Some("main".into()),
+                ..Default::default()
+            })),
+        );
+        assert_eq!(
+            reduce(&mut s, Action::CompareWith("dev".into())),
+            [Effect::Spawn {
+                repo: id,
+                job: Job::Compare {
+                    base: "main".into(),
+                    other: "dev".into()
+                }
+            }]
+        );
+        let result = |other: &str| JobResult::Compare {
+            base: "main".into(),
+            other: other.into(),
+            result: Ok((vec![Commit::default()], vec![])),
+        };
+        // Результат для другого сравнения не применяется.
+        apply_result(&mut s, id, result("origin/dev"));
+        let view = |s: &AppState| s.active_repo().unwrap().file_view.clone();
+        assert!(matches!(
+            view(&s),
+            Some(FileView::Compare { only_other: None, .. })
+        ));
+        apply_result(&mut s, id, result("dev"));
+        assert!(matches!(
+            view(&s),
+            Some(FileView::Compare { only_other: Some(o), only_base: Some(b), .. }) if o.len() == 1 && b.is_empty()
+        ));
+        let fx = reduce(&mut s, Action::ShowCompareDiff);
+        let range = DiffTarget::Range {
+            from: "main".into(),
+            to: "dev".into(),
+        };
+        assert_eq!(
+            fx,
+            [Effect::Spawn {
+                repo: id,
+                job: Job::Diff(range.clone())
+            }]
+        );
+        let r = s.active_repo().unwrap();
+        assert_eq!(r.diff_target, Some(range));
+        assert!(r.file_view.is_none());
     }
 }

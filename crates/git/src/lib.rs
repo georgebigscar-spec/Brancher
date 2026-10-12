@@ -169,6 +169,21 @@ impl Git {
         commands::log::parse(&out.stdout)
     }
 
+    /// Коммиты `to`, которых нет в `from`.
+    pub fn log_range(
+        &self,
+        repo: &Path,
+        from: &str,
+        to: &str,
+        limit: usize,
+        cancel: &CancelToken,
+    ) -> Result<Vec<Commit>, GitError> {
+        let args = commands::log::range_args(from, to, limit);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self.runner.run(Some(repo), &args, None, cancel)?;
+        commands::log::parse(&out.stdout)
+    }
+
     /// История файла с переименованиями, новые коммиты сверху.
     pub fn file_log(
         &self,

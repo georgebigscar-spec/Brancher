@@ -36,6 +36,12 @@ pub fn args(target: &DiffTarget) -> Vec<String> {
             a.extend([id.clone(), "--".into()]);
             return a;
         }
+        DiffTarget::Range { from, to } => {
+            let mut a = vec!["diff".into()];
+            a.extend(COMMON.map(String::from));
+            a.extend([format!("{from}...{to}"), "--".into()]);
+            return a;
+        }
         DiffTarget::Change { untracked: true, .. } => vec!["diff".into(), "--no-index".into()],
         DiffTarget::Change { staged: true, .. } => vec!["diff".into(), "--cached".into()],
         DiffTarget::Change { conflicted: true, .. } => vec!["diff".into(), "HEAD".into()],

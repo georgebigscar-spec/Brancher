@@ -15,6 +15,9 @@ pub enum DiffTarget {
         /// Файл с конфликтом: показывается рабочая копия против HEAD, с маркерами конфликта.
         conflicted: bool,
     },
+    /// Что изменилось в `to` с общего предка с `from` (`git diff from...to`):
+    /// то, что принесёт слияние `to` в `from`.
+    Range { from: String, to: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

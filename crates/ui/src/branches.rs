@@ -81,7 +81,7 @@ fn ref_row(ui: &mut Ui, r: &GitRef, current: Option<&str>, actions: &mut Vec<Act
     if response.double_clicked() {
         actions.extend(switch.clone());
     }
-    widgets::context_menu(&response, 220.0, |ui| {
+    widgets::context_menu(&response, 300.0, |ui| {
         if let Some(a) = &switch {
             if widgets::menu_item(ui, "Переключиться", None).clicked() {
                 actions.push(a.clone());
@@ -92,6 +92,9 @@ fn ref_row(ui: &mut Ui, r: &GitRef, current: Option<&str>, actions: &mut Vec<Act
         }
         if let (Some(current), false) = (current, r.is_head) {
             widgets::menu_separator(ui);
+            if widgets::menu_item(ui, &format!("Сравнить с {current}"), None).clicked() {
+                actions.push(Action::CompareWith(r.name.clone()));
+            }
             if widgets::menu_item(ui, &format!("Слить в {current}"), None).clicked() {
                 actions.push(Action::Merge(r.name.clone()));
             }

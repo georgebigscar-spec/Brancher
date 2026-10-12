@@ -761,3 +761,41 @@ fn interactive_rebase_reword_squash_fixup_drop_and_reorder() {
     g.abort_operation(p, Operation::Rebase, &c).unwrap();
     assert_eq!(g.status(p, &c).unwrap().head.unwrap(), x2);
 }
+
+#[test]
+fn compare_branches_commits_and_range_diff() {
+    let repo = TempRepo::new("compare");
+    let (g, c) = (git(), CancelToken::new());
+    let p = repo.path();
+    let commit = |file: &str, text: &str, msg: &str| {
+        repo.write(file, text);
+        g.stage(p, &[file.into()], &c).unwrap();
+        g.commit(p, msg, false, &c).unwrap();
+    };
+    commit("a.txt", "a\n", "base");
+    g.create_branch(p, "feature", "main", false, &c).unwrap();
+    commit("main.txt", "m\n", "on main");
+    g.switch(p, "feature", &c).unwrap();
+    commit("f.txt", "f\n", "feature 1");
+    commit("f.txt", "f2\n", "feature 2");
+    g.switch(p, "main", &c).unwrap();
+
+    let subjects = |v: Vec<brancher_core::Commit>| v.into_iter().map(|c| c.subject).collect::<Vec<_>>();
+    assert_eq!(
+        subjects(g.log_range(p, "main", "feature", 100, &c).unwrap()),
+        ["feature 2", "feature 1"]
+    );
+    assert_eq!(
+        subjects(g.log_range(p, "feature", "main", 100, &c).unwrap()),
+        ["on main"]
+    );
+
+    // Diff от общего предка: изменений main в нём нет.
+    let target = DiffTarget::Range {
+        from: "main".into(),
+        to: "feature".into(),
+    };
+    let files = g.diff(p, &target, &c).unwrap();
+    let paths: Vec<_> = files.iter().map(|f| f.path().to_owned()).collect();
+    assert_eq!(paths, ["f.txt"]);
+}
