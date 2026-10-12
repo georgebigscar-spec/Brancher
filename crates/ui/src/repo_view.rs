@@ -1,12 +1,12 @@
 //! Вкладка репозитория: ветки слева, история в центре, изменения и коммит справа.
 //! Граф коммитов рисует [`crate::graph`]; diff и blame — следующие шаги MVP.
 
-use brancher_core::{Action, Change, Commit, DiffTarget, RefKind, RepoState};
+use brancher_core::{Action, Change, Commit, DiffTarget, RefKind, RepoState, Settings};
 use egui::{RichText, Ui};
 
 const ROW_HEIGHT: f32 = 24.0;
 
-pub fn show(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut Ui, repo: &RepoState, settings: &Settings, actions: &mut Vec<Action>) {
     if let Some(c) = &repo.confirm {
         let answer = widgets::confirm_dialog(
             ui.ctx(),
@@ -43,7 +43,7 @@ pub fn show(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
                     history(ui, repo, actions);
                 });
                 ui.separator();
-                crate::diff_view::show(ui, repo, actions);
+                crate::diff_view::show(ui, repo, settings, actions);
             } else {
                 history(ui, repo, actions);
             }
