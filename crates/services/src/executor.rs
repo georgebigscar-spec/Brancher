@@ -32,7 +32,10 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
                 reverse,
             } => git.apply(repo, patch, *cached, *reverse, cancel)?,
             Job::Diff(target) => {
-                let diff = git.diff(repo, target, cancel).map(Diff::new);
+                let diff = git.diff(repo, target, cancel).map(|mut files| {
+                    crate::highlight::highlight(&mut files);
+                    Diff::new(files)
+                });
                 emit(JobResult::Diff {
                     target: target.clone(),
                     result: diff.map_err(Into::into),

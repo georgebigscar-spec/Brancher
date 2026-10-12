@@ -4,6 +4,7 @@
 //! свой worker, задачи изменения выполняются строго по одной (без гонок за `index.lock`).
 
 mod executor;
+pub mod highlight;
 mod queue;
 
 pub use executor::execute;

@@ -2,8 +2,9 @@
 //! по плоскому списку [`brancher_core::DiffRow`], рисуются только видимые строки.
 
 use brancher_core::{
-    Action, Diff, DiffRow, DiffTarget, FileDiff, LineKind, RepoState, Settings, SplitRow, TAB_WIDTH,
+    Action, Diff, DiffLine, DiffRow, DiffTarget, FileDiff, LineKind, RepoState, Settings, SplitRow, TAB_WIDTH,
 };
+use egui::text::{LayoutJob, TextFormat};
 use egui::{pos2, vec2, Align2, Color32, FontId, Rect, Sense, Ui};
 use widgets::{mix, Theme};
 
@@ -202,18 +203,38 @@ impl Paint<'_> {
             self.font.clone(),
             t.muted_foreground,
         );
-        let (text, color) = if line.kind == LineKind::NoNewline {
-            (line.text.clone(), t.muted_foreground)
-        } else {
-            (line.text.replace('\t', &" ".repeat(TAB_WIDTH)), t.foreground)
+        let job = self.code_job(line);
+        let galley = painter.layout_job(job);
+        let pos = pos2(x + MARKER_WIDTH, y - galley.size().y / 2.0);
+        painter.galley(pos, galley, t.foreground);
+    }
+
+    /// Текст строки кода с подсветкой синтаксиса; табуляции раскрываются в каждом участке.
+    fn code_job(&self, line: &DiffLine) -> LayoutJob {
+        let t = &self.theme;
+        let mut job = LayoutJob::default();
+        let mut push = |text: &str, color: Color32| {
+            let text = text.replace('\t', &" ".repeat(TAB_WIDTH));
+            job.append(&text, 0.0, TextFormat::simple(self.font.clone(), color));
         };
-        painter.text(
-            pos2(x + MARKER_WIDTH, y),
-            Align2::LEFT_CENTER,
-            text,
-            self.font.clone(),
-            color,
-        );
+        if line.kind == LineKind::NoNewline {
+            push(&line.text, t.muted_foreground);
+            return job;
+        }
+        let text = line.text.as_str();
+        let mut at = 0;
+        for span in &line.spans {
+            let (start, end) = (span.start as usize, span.end as usize);
+            let (Some(_), Some(part)) = (text.get(at..start), text.get(start..end)) else {
+                continue;
+            };
+            push(&text[at..start], t.foreground);
+            let [r, g, b] = if t.dark { span.dark } else { span.light };
+            push(part, Color32::from_rgb(r, g, b));
+            at = end;
+        }
+        push(&text[at..], t.foreground);
+        job
     }
 
     fn hunk_row(
