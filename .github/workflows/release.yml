@@ -1,0 +1,65 @@
+name: Release
+
+# Сборки для Linux и Windows прикладываются к опубликованному релизу GitHub.
+# Для уже существующего релиза сборку можно запустить вручную с его тегом.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Тег релиза, к которому приложить сборки
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - run: cargo build --release --locked -p brancher --target ${{ matrix.target }}
+
+      - name: Упаковать (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          name="brancher-${TAG}-linux-x86_64"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/brancher" README.md LICENSE "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
+      - name: Упаковать (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "brancher-$env:TAG-windows-x86_64"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/brancher.exe", README.md, LICENSE $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          "ASSET=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Приложить к релизу
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$ASSET" --clobber --repo "${{ github.repository }}"

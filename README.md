@@ -109,6 +109,12 @@ cargo test --workspace                                             # + snapshot-
    combobox с поиском, постоянные уведомления, Alert с кнопками, drag в Tree.
 3. Editor helper (NFR-09): `GIT_EDITOR` для rebase -i и сообщений merge.
 
+## Релизы
+
+При публикации релиза на GitHub workflow `Release` собирает Brancher для Linux (x86_64,
+`.tar.gz`) и Windows (x86_64, `.zip`) и прикладывает архивы к релизу. Для уже существующего
+релиза его можно запустить вручную (Actions → Release → Run workflow) с тегом релиза.
+
 ## Лицензия
 
 MIT. Код `crates/widgets` — MIT, © georgebigscar-spec (shadcn_egui).
