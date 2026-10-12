@@ -1002,3 +1002,38 @@ fn absorb_moves_staged_hunks_into_branch_commits() {
     changed.sort();
     assert_eq!(changed, ["f.txt", "h.txt"]);
 }
+
+#[test]
+fn merge_conflicts_preview_leaves_working_copy_alone() {
+    let (g, version) = Git::detect().unwrap();
+    if (version.major, version.minor) < (2, 38) {
+        // `merge-tree --write-tree` появился в git 2.38: на старом git превью нет.
+        let repo = TempRepo::new("preview-old");
+        assert!(g
+            .merge_conflicts(repo.path(), "HEAD", &CancelToken::new())
+            .is_err());
+        return;
+    }
+    let repo = TempRepo::new("preview");
+    let c = CancelToken::new();
+    let p = repo.path();
+    let commit = |file: &str, text: &str, msg: &str| {
+        repo.write(file, text);
+        g.stage(p, &[file.into()], &c).unwrap();
+        g.commit(p, msg, false, &c).unwrap();
+    };
+    commit("a.txt", "a\n", "base");
+    g.create_branch(p, "dev", "main", false, &c).unwrap();
+    commit("a.txt", "main\n", "main change");
+    commit("b.txt", "b\n", "add b");
+    g.switch(p, "dev", &c).unwrap();
+    commit("c.txt", "c\n", "dev only");
+    assert!(g.merge_conflicts(p, "main", &c).unwrap().is_empty());
+    commit("a.txt", "dev\n", "dev change");
+    repo.write("c.txt", "dirty\n");
+    assert_eq!(g.merge_conflicts(p, "main", &c).unwrap(), ["a.txt"]);
+    let st = g.status(p, &c).unwrap();
+    assert!(st.operation.is_none());
+    assert_eq!(st.changes.len(), 1);
+    assert_eq!(fs::read_to_string(p.join("a.txt")).unwrap(), "dev\n");
+}

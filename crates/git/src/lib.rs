@@ -65,6 +65,22 @@ impl Git {
         self.start_operation(repo, &commands::merge::merge_args(target), cancel)
     }
 
+    /// Файлы, в которых слияние HEAD с `target` даст конфликты; рабочая копия не меняется.
+    /// Требует git 2.38+ (`merge-tree --write-tree`), на старом git — ошибка.
+    pub fn merge_conflicts(
+        &self,
+        repo: &Path,
+        target: &str,
+        cancel: &CancelToken,
+    ) -> Result<Vec<String>, GitError> {
+        let args = commands::merge::preview_args(target);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self
+            .runner
+            .run_accepting(Some(repo), &args, None, cancel, &[0, 1])?;
+        Ok(commands::merge::parse_preview(&out.stdout))
+    }
+
     pub fn rebase(&self, repo: &Path, onto: &str, cancel: &CancelToken) -> Result<(), GitError> {
         self.start_operation(repo, &commands::merge::rebase_args(onto), cancel)
     }

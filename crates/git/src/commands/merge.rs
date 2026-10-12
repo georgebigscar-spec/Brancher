@@ -13,6 +13,32 @@ pub fn merge_args(target: &str) -> Vec<String> {
     owned(&["merge", "--no-edit", target])
 }
 
+/// Пробное слияние HEAD и `target` без изменения рабочей копии (git 2.38+).
+/// Код выхода 0 — без конфликтов, 1 — с конфликтами.
+pub fn preview_args(target: &str) -> Vec<String> {
+    owned(&[
+        "merge-tree",
+        "--write-tree",
+        "--name-only",
+        "--no-messages",
+        "-z",
+        "HEAD",
+        target,
+    ])
+}
+
+/// Файлы с конфликтами из [`preview_args`]: после OID дерева, до пустой записи.
+pub fn parse_preview(out: &[u8]) -> Vec<String> {
+    let mut fields = out.split(|b| *b == 0);
+    fields.next();
+    let mut files: Vec<String> = fields
+        .take_while(|f| !f.is_empty())
+        .map(|f| String::from_utf8_lossy(f).into_owned())
+        .collect();
+    files.dedup();
+    files
+}
+
 pub fn rebase_args(onto: &str) -> Vec<String> {
     owned(&["rebase", onto])
 }
@@ -66,6 +92,13 @@ pub fn detect(git_dir: &Path) -> (Option<Operation>, Option<(u32, u32)>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parses_merge_tree_preview() {
+        assert!(parse_preview(b"abc123\0").is_empty());
+        let out = b"abc123\0a.txt\0a.txt\0dir/b c.txt\0\0";
+        assert_eq!(parse_preview(out), ["a.txt", "dir/b c.txt"]);
+    }
+
     use super::*;
 
     #[test]
