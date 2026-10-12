@@ -22,6 +22,7 @@ pub fn show(ui: &mut Ui, repo: &RepoState, settings: &Settings, actions: &mut Ve
         }
     }
     crate::branches::new_branch_dialog(ui.ctx(), actions);
+    crate::stash::dialog(ui.ctx(), actions);
     toolbar(ui, repo, actions);
     ui.separator();
     let height = ui.available_height();
@@ -127,6 +128,14 @@ fn remote_buttons(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
         .clicked()
     {
         actions.push(Action::Fetch);
+    }
+    let dirty = repo.status.as_ref().is_some_and(|s| !s.changes.is_empty());
+    if ui
+        .add_enabled(dirty, widgets::Button::outline("Stash"))
+        .on_hover_text("Спрятать изменения рабочей копии")
+        .clicked()
+    {
+        crate::stash::open_dialog(ui.ctx());
     }
 }
 

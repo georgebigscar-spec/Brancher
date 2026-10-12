@@ -5,6 +5,7 @@ mod branches;
 mod diff_view;
 mod graph;
 mod repo_view;
+mod stash;
 mod welcome;
 
 use brancher_core::{Action, AppState, Severity};

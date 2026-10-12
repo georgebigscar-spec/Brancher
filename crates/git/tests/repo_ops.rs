@@ -395,3 +395,64 @@ fn fetch_pull_and_push_with_local_remote() {
     assert!(origin.path().join("b.txt").exists());
     let _ = fs::remove_dir_all(&bare);
 }
+
+#[test]
+fn stash_push_list_apply_pop_and_drop() {
+    let repo = TempRepo::new("stash");
+    let (g, c) = (git(), CancelToken::new());
+    let p = repo.path();
+    repo.write("a.txt", "a\n");
+    g.stage(p, &["a.txt".into()], &c).unwrap();
+    g.commit(p, "init", false, &c).unwrap();
+    let head = g.status(p, &c).unwrap().head.unwrap();
+    assert!(g.stashes(p, &c).unwrap().is_empty());
+
+    repo.write("a.txt", "a\nb\n");
+    g.stash_push(p, "первый", false, &c).unwrap();
+    repo.write("new.txt", "n\n");
+    g.stash_push(p, "", true, &c).unwrap();
+    assert!(g.status(p, &c).unwrap().changes.is_empty());
+
+    let list = g.stashes(p, &c).unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(
+        list[0].message.starts_with("WIP on main"),
+        "{:?}",
+        list[0].message
+    );
+    assert_eq!(list[1].message, "On main: первый");
+    assert_eq!(list[1].base.as_deref(), Some(head.as_str()));
+    // Коммиты stash не попадают в историю.
+    assert_eq!(g.log(p, 100, &c).unwrap().len(), 1);
+
+    // Diff записи — изменения относительно базового коммита.
+    let diff = g
+        .diff(
+            p,
+            &DiffTarget::Commit {
+                id: list[1].id.clone(),
+                parent: list[1].base.clone(),
+            },
+            &c,
+        )
+        .unwrap();
+    assert_eq!(diff.len(), 1);
+    assert_eq!(diff[0].path(), "a.txt");
+
+    // Номер с чужим коммитом — отказ без изменений.
+    assert!(matches!(
+        g.stash_apply(p, 0, &list[1].id, false, &c),
+        Err(GitError::Stale(_))
+    ));
+    g.stash_apply(p, 0, &list[0].id, true, &c).unwrap();
+    assert!(p.join("new.txt").exists());
+    let list = g.stashes(p, &c).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].message, "On main: первый");
+
+    g.stash_apply(p, 0, &list[0].id, false, &c).unwrap();
+    assert_eq!(fs::read_to_string(p.join("a.txt")).unwrap(), "a\nb\n");
+    assert_eq!(g.stashes(p, &c).unwrap().len(), 1);
+    g.stash_drop(p, 0, &list[0].id, &c).unwrap();
+    assert!(g.stashes(p, &c).unwrap().is_empty());
+}

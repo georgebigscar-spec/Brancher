@@ -56,6 +56,21 @@ pub enum Job {
     Push {
         set_upstream: Option<(String, String)>,
     },
+    /// Спрятать изменения рабочей копии; `untracked` — и неотслеживаемые файлы.
+    StashPush {
+        message: String,
+        untracked: bool,
+    },
+    /// Применить `stash@{index}`, если там всё ещё коммит `id`; `pop` — затем удалить запись.
+    StashApply {
+        index: usize,
+        id: Oid,
+        pop: bool,
+    },
+    StashDrop {
+        index: usize,
+        id: Oid,
+    },
 }
 
 impl Job {
@@ -80,6 +95,10 @@ impl Job {
             Job::Fetch => "fetch",
             Job::Pull => "pull",
             Job::Push { .. } => "push",
+            Job::StashPush { .. } => "stash",
+            Job::StashApply { pop: false, .. } => "stash apply",
+            Job::StashApply { pop: true, .. } => "stash pop",
+            Job::StashDrop { .. } => "stash drop",
         }
     }
 
@@ -107,6 +126,7 @@ impl History {
 pub enum JobResult {
     Status(Result<RepoStatus, JobError>),
     Refs(Result<Vec<GitRef>, JobError>),
+    Stashes(Result<Vec<Stash>, JobError>),
     History(Result<History, JobError>),
     Diff {
         target: DiffTarget,
@@ -204,6 +224,18 @@ pub enum Action {
     Fetch,
     Pull,
     Push,
+    /// Спрятать все изменения рабочей копии.
+    Stash {
+        message: String,
+        untracked: bool,
+    },
+    /// Показать diff записи stash по номеру.
+    SelectStash(usize),
+    ApplyStash(usize),
+    /// Применить и удалить запись.
+    PopStash(usize),
+    /// Удалить запись (спрашивает подтверждение).
+    DropStash(usize),
     /// Отменить идущую сетевую задачу активной вкладки.
     CancelJob,
     /// Ответ на запрос git (первый в очереди); `None` — отмена.
@@ -320,6 +352,7 @@ pub struct RepoState {
     pub name: String,
     pub status: Option<RepoStatus>,
     pub refs: Vec<GitRef>,
+    pub stashes: Vec<Stash>,
     pub history: Vec<Commit>,
     /// Раскладка графа для `history`, строка в строку.
     pub graph: CommitGraph,
@@ -905,6 +938,56 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     }
                     vec![]
                 }
+                Action::Stash { message, untracked } => {
+                    let changes = repo.status.as_ref().map_or(0, |s| s.changes.len());
+                    if changes == 0 {
+                        state.notifications.push(Notification {
+                            severity: Severity::Info,
+                            title: "Нечего прятать".into(),
+                            details: "В рабочей копии нет изменений.".into(),
+                        });
+                        vec![]
+                    } else {
+                        let message = message.trim().to_owned();
+                        spawn(Job::StashPush { message, untracked })
+                    }
+                }
+                Action::SelectStash(index) => match repo.stashes.get(index) {
+                    Some(st) => {
+                        let target = DiffTarget::Commit {
+                            id: st.id.clone(),
+                            parent: st.base.clone(),
+                        };
+                        repo.selected_commit = None;
+                        repo.show_diff(target)
+                    }
+                    None => vec![],
+                },
+                Action::ApplyStash(index) | Action::PopStash(index) => match repo.stashes.get(index) {
+                    Some(st) => spawn(Job::StashApply {
+                        index,
+                        id: st.id.clone(),
+                        pop: matches!(action, Action::PopStash(_)),
+                    }),
+                    None => vec![],
+                },
+                Action::DropStash(index) => {
+                    if let Some(st) = repo.stashes.get(index) {
+                        repo.confirm = Some(Confirm {
+                            title: format!("Удалить stash@{{{index}}}?"),
+                            description: format!(
+                                "«{}». Спрятанные изменения пропадут, найти их потом будет трудно.",
+                                st.message
+                            ),
+                            action: "Удалить".into(),
+                            job: Job::StashDrop {
+                                index,
+                                id: st.id.clone(),
+                            },
+                        });
+                    }
+                    vec![]
+                }
                 Action::Confirm(yes) => match repo.confirm.take() {
                     Some(c) if yes => {
                         repo.clear_selection();
@@ -1019,6 +1102,15 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
     match result {
         JobResult::Status(Ok(s)) => r.status = Some(s),
         JobResult::Refs(Ok(refs)) => r.refs = refs,
+        JobResult::Stashes(Ok(stashes)) => {
+            // Удалённая или сдвинутая запись: её diff больше не тот.
+            let shown =
+                |st: &Stash| matches!(&r.diff_target, Some(DiffTarget::Commit { id, .. }) if *id == st.id);
+            if r.stashes.iter().any(shown) && !stashes.iter().any(shown) {
+                r.close_diff();
+            }
+            r.stashes = stashes;
+        }
         JobResult::History(Ok(h)) => {
             r.history = h.commits;
             r.graph = h.graph;
@@ -1041,9 +1133,10 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
                 }
             }
         }
-        JobResult::Status(Err(e)) | JobResult::Refs(Err(e)) | JobResult::History(Err(e)) => {
-            error = Some(("Не удалось прочитать репозиторий".to_owned(), e))
-        }
+        JobResult::Status(Err(e))
+        | JobResult::Refs(Err(e))
+        | JobResult::Stashes(Err(e))
+        | JobResult::History(Err(e)) => error = Some(("Не удалось прочитать репозиторий".to_owned(), e)),
         JobResult::CloneProgress { .. } | JobResult::Cloned { .. } | JobResult::Prompt { .. } => {
             unreachable!("обработано выше")
         }
@@ -2011,5 +2104,81 @@ mod tests {
             [Effect::AnswerPrompt { id: 2, answer: None }]
         );
         assert!(reduce(&mut s, Action::AnswerPrompt(None)).is_empty());
+    }
+
+    fn stash(index: usize, id: &str) -> Stash {
+        Stash {
+            index,
+            id: id.into(),
+            base: Some("base".into()),
+            time: 0,
+            message: format!("On main: {id}"),
+        }
+    }
+
+    #[test]
+    fn stash_actions() {
+        let mut s = AppState::new();
+        let id = open(&mut s, "/a");
+        let spawned = |fx: Vec<Effect>| match &fx[..] {
+            [Effect::Spawn { job, .. }] => job.clone(),
+            other => panic!("unexpected {other:?}"),
+        };
+        // Без изменений прятать нечего.
+        set_status(&mut s, id, vec![]);
+        let untracked = true;
+        let push = || Action::Stash {
+            message: "  wip ".into(),
+            untracked,
+        };
+        assert!(reduce(&mut s, push()).is_empty());
+        assert_eq!(s.notifications.len(), 1);
+        set_status(&mut s, id, vec![change("a", None, Some(ChangeKind::Modified))]);
+        assert_eq!(
+            spawned(reduce(&mut s, push())),
+            Job::StashPush {
+                message: "wip".into(),
+                untracked
+            }
+        );
+
+        apply_result(
+            &mut s,
+            id,
+            JobResult::Stashes(Ok(vec![stash(0, "s0"), stash(1, "s1")])),
+        );
+        assert_eq!(
+            spawned(reduce(&mut s, Action::PopStash(1))),
+            Job::StashApply {
+                index: 1,
+                id: "s1".into(),
+                pop: true
+            }
+        );
+        assert!(reduce(&mut s, Action::ApplyStash(7)).is_empty());
+
+        // Diff записи — относительно базового коммита.
+        assert_eq!(
+            spawned(reduce(&mut s, Action::SelectStash(1))),
+            Job::Diff(DiffTarget::Commit {
+                id: "s1".into(),
+                parent: Some("base".into())
+            })
+        );
+
+        // Удаление — только после подтверждения.
+        assert!(reduce(&mut s, Action::DropStash(1)).is_empty());
+        assert_eq!(
+            spawned(reduce(&mut s, Action::Confirm(true))),
+            Job::StashDrop {
+                index: 1,
+                id: "s1".into()
+            }
+        );
+        // Запись пропала из списка — её diff закрывается.
+        apply_result(&mut s, id, JobResult::Stashes(Ok(vec![stash(0, "s0")])));
+        let repo = s.active_repo().unwrap();
+        assert!(repo.diff_target.is_none());
+        assert_eq!(repo.stashes.len(), 1);
     }
 }

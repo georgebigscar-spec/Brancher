@@ -10,6 +10,7 @@ pub mod progress;
 pub mod refs;
 pub mod remote;
 pub mod stage;
+pub mod stash;
 pub mod status;
 
 /// Разбивает вывод по NUL, отбрасывая пустой хвост.
