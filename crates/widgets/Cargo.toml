@@ -1,0 +1,14 @@
+[package]
+name = "widgets"
+version = "0.1.0"
+edition.workspace = true
+description = "UI components (ported from shadcn_egui @ 7425c3f, MIT) — evolved as part of the project"
+license = "MIT"
+publish = false
+
+[dependencies]
+egui.workspace = true
+
+[dev-dependencies]
+eframe.workspace = true
+egui_kittest = { workspace = true, features = ["wgpu", "snapshot"] }

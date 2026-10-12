@@ -1,0 +1,10 @@
+[package]
+name = "brancher-core"
+description = "Модели, состояние приложения и редьюсеры. Без ввода-вывода."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "brancher_core"

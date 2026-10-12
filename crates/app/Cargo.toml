@@ -1,0 +1,19 @@
+[package]
+name = "brancher"
+description = "Brancher — кроссплатформенный Git-клиент."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "brancher"
+path = "src/main.rs"
+
+[dependencies]
+eframe.workspace = true
+egui.workspace = true
+brancher-core.workspace = true
+brancher-git.workspace = true
+brancher-services.workspace = true
+brancher-ui.workspace = true

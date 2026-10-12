@@ -1,0 +1,4 @@
+/target
+**/*.rs.bk
+crates/widgets/tests/snapshots/**/*.new.png
+crates/widgets/tests/snapshots/**/*.diff.png

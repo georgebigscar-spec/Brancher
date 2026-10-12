@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/app", "crates/ui", "crates/widgets", "crates/core", "crates/git", "crates/services"]
+default-members = ["crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# Версия egui закреплена и обновляется раз за релиз вместе с крейтом widgets (раздел 15).
+egui = "0.36"
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "glow", "wayland", "x11"] }
+egui_extras = "0.36"
+egui_kittest = "0.36"
+
+brancher-core = { path = "crates/core" }
+brancher-git = { path = "crates/git" }
+brancher-services = { path = "crates/services" }
+brancher-ui = { path = "crates/ui" }
+widgets = { path = "crates/widgets" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

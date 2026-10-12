@@ -1,0 +1,13 @@
+[package]
+name = "brancher-git"
+description = "Запуск git CLI, построители аргументов и парсеры вывода."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "brancher_git"
+
+[dependencies]
+brancher-core.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "brancher-ui"
+description = "Панели и Git-специфичные виджеты (граф, diff, blame)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "brancher_ui"
+
+[dependencies]
+egui.workspace = true
+widgets.workspace = true
+brancher-core.workspace = true
