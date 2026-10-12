@@ -167,8 +167,14 @@ impl Paint<'_> {
             }
             _ => None,
         };
+        // Убрать файл можно из последнего коммита текущей ветки (не удалённый в нём).
+        let status = self.repo.status.as_ref();
+        let head = status.and_then(|s| s.head.as_deref());
+        let uncommit = status.is_some_and(|s| s.branch.is_some())
+            && file.new_path.is_some()
+            && matches!(&self.repo.diff_target, Some(DiffTarget::Commit { id, .. }) if Some(id.as_str()) == head);
         if let Some((path, rev)) = target {
-            crate::repo_view::file_menu(response, &path, rev.as_deref(), actions);
+            crate::repo_view::file_menu(response, &path, rev.as_deref(), uncommit, actions);
         }
     }
 

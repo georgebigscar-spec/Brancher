@@ -107,6 +107,14 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
                 commit: commit.clone(),
                 result: git.commit_message(repo, commit, cancel).map_err(Into::into),
             }),
+            Job::Uncommit { commit, rebase } => {
+                let rebase = rebase.as_ref().map(|(b, steps)| (b.as_deref(), steps.as_slice()));
+                git.uncommit(repo, commit, rebase, cancel)?
+            }
+            Job::AmendInto { commit, base, steps } => {
+                git.amend_into(repo, commit, base.as_deref(), steps, cancel)?
+            }
+            Job::UncommitFile(path) => git.uncommit_file(repo, path, cancel)?,
             Job::Snapshots => emit(JobResult::Snapshots(
                 git.snapshots(repo, OPLOG_LIMIT, cancel).map_err(Into::into),
             )),

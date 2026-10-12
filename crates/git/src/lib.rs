@@ -277,6 +277,91 @@ impl Git {
         git.start_operation(repo, &commands::rebase::start_args(base), cancel)
     }
 
+    /// Отменяет коммит, оставляя его изменения незакоммиченными (в индексе).
+    /// `rebase` — план без этого коммита, если он не последний: `(база, шаги)`.
+    pub fn uncommit(
+        &self,
+        repo: &Path,
+        commit: &str,
+        rebase: Option<(Option<&str>, &[RebaseStep])>,
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        let run = |args: &[&str]| self.runner.run(Some(repo), args, None, cancel).map(|_| ());
+        match rebase {
+            None if self.has_parent(repo, "HEAD", cancel)? => run(&["reset", "--soft", "-q", "HEAD~1"]),
+            // Единственный коммит: ветка снова пустая, файлы остаются в индексе.
+            None => run(&["update-ref", "-d", "HEAD"]),
+            Some((base, steps)) => {
+                self.interactive_rebase(repo, base, steps, cancel)?;
+                if self.status(repo, cancel)?.operation.is_some() {
+                    return Err(GitError::Stale(
+                        "Rebase без этого коммита остановился на конфликте. Прервите rebase \
+                         или разрешите конфликт; всё вернуть можно через «История»"
+                            .into(),
+                    ));
+                }
+                self.start_operation(repo, &strs_owned(&["cherry-pick", "--no-commit", commit]), cancel)
+            }
+        }
+    }
+
+    /// Добавляет проиндексированные изменения в коммит `commit` (ниже HEAD): fixup-коммит
+    /// и interactive rebase, где он сразу после `commit`.
+    pub fn amend_into(
+        &self,
+        repo: &Path,
+        commit: &str,
+        base: Option<&str>,
+        steps: &[RebaseStep],
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        let msg = format!("fixup! {commit}");
+        self.runner.run(
+            Some(repo),
+            &["commit", "--no-verify", "-F", "-"],
+            Some(msg.as_bytes()),
+            cancel,
+        )?;
+        let fixup = self.status(repo, cancel)?.head.unwrap_or_default();
+        let mut plan = steps.to_vec();
+        let at = plan
+            .iter()
+            .position(|s| s.commit == commit)
+            .map_or(plan.len(), |i| i + 1);
+        plan.insert(
+            at,
+            RebaseStep {
+                action: RebaseAction::Fixup,
+                commit: fixup,
+                subject: msg,
+                message: None,
+            },
+        );
+        self.interactive_rebase(repo, base, &plan, cancel)
+    }
+
+    /// Убирает файл из последнего коммита; его изменения остаются в рабочей копии.
+    pub fn uncommit_file(&self, repo: &Path, path: &str, cancel: &CancelToken) -> Result<(), GitError> {
+        let run = |args: &[&str]| self.runner.run(Some(repo), args, None, cancel).map(|_| ());
+        if self.has_parent(repo, "HEAD", cancel)? {
+            run(&["reset", "-q", "HEAD~1", "--", path])?;
+        } else {
+            run(&["rm", "--cached", "-q", "--", path])?;
+        }
+        run(&["commit", "--amend", "--no-edit", "--allow-empty", "--no-verify"])
+    }
+
+    fn has_parent(&self, repo: &Path, rev: &str, cancel: &CancelToken) -> Result<bool, GitError> {
+        let out = self.runner.run_accepting(
+            Some(repo),
+            &["rev-parse", "--verify", "--quiet", &format!("{rev}^")],
+            None,
+            cancel,
+            &[0, 1],
+        )?;
+        Ok(!out.stdout_lossy().trim().is_empty())
+    }
+
     /// Полное сообщение коммита (для reword).
     pub fn commit_message(
         &self,
@@ -740,4 +825,8 @@ impl Git {
 
 fn strs(args: &[String]) -> Vec<&str> {
     args.iter().map(String::as_str).collect()
+}
+
+fn strs_owned(args: &[&str]) -> Vec<String> {
+    args.iter().map(|s| (*s).to_owned()).collect()
 }

@@ -28,6 +28,7 @@ pub fn show(ui: &mut Ui, repo: &RepoState, settings: &Settings, actions: &mut Ve
     crate::stash::dialog(ui.ctx(), actions);
     crate::remotes::dialog(ui.ctx(), repo, actions);
     crate::oplog::dialog(ui.ctx(), repo, actions);
+    crate::branches::message_dialog(ui.ctx(), repo, actions);
     if let Some(plan) = &repo.rebase_plan {
         crate::rebase_plan::dialog(ui.ctx(), plan, actions);
     }
@@ -170,7 +171,6 @@ fn history(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
         None => crate::graph::column_width(&repo.graph),
     };
     let count = repo.history_filter.as_ref().map_or(repo.history.len(), Vec::len);
-    let current = repo.status.as_ref().and_then(|s| s.branch.as_deref());
     if count == 0 {
         widgets::muted(ui, "Ничего не найдено.");
         return;
@@ -192,7 +192,7 @@ fn history(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
                 if response.clicked() {
                     actions.push(Action::SelectCommit(Some(c.id.clone())));
                 }
-                crate::branches::commit_menu(&response, c, current, actions);
+                crate::branches::commit_menu(&response, c, repo, actions);
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }
@@ -378,8 +378,15 @@ fn operation_banner(ui: &mut Ui, status: &RepoStatus, op: Operation, actions: &m
 }
 
 /// Меню файла: blame (в коммите `rev` или в рабочей копии) и история.
-pub(crate) fn file_menu(response: &egui::Response, path: &str, rev: Option<&str>, actions: &mut Vec<Action>) {
-    widgets::context_menu(response, 200.0, |ui| {
+/// Меню файла: blame и история; `uncommit` — ещё «Убрать из коммита» (файл последнего коммита).
+pub(crate) fn file_menu(
+    response: &egui::Response,
+    path: &str,
+    rev: Option<&str>,
+    uncommit: bool,
+    actions: &mut Vec<Action>,
+) {
+    widgets::context_menu(response, 240.0, |ui| {
         if widgets::menu_item(ui, "Blame", None).clicked() {
             actions.push(Action::ShowBlame {
                 path: path.to_owned(),
@@ -388,6 +395,15 @@ pub(crate) fn file_menu(response: &egui::Response, path: &str, rev: Option<&str>
         }
         if widgets::menu_item(ui, "История файла", None).clicked() {
             actions.push(Action::ShowFileHistory(path.to_owned()));
+        }
+        if uncommit {
+            widgets::menu_separator(ui);
+            if widgets::menu_item(ui, "Убрать из коммита", None)
+                .on_hover_text("Файл уйдёт из последнего коммита, его изменения останутся в рабочей копии")
+                .clicked()
+            {
+                actions.push(Action::UncommitFile(path.to_owned()));
+            }
         }
     });
 }
@@ -448,7 +464,7 @@ fn file_list(
                         "Клик — diff, двойной клик — stage"
                     });
                     if !c.is_conflicted() && c.unstaged != Some(ChangeKind::Untracked) {
-                        file_menu(&r, &c.path, None, actions);
+                        file_menu(&r, &c.path, None, false, actions);
                     }
                     if c.is_conflicted() {
                         let (ours, theirs) = side_labels(repo.operation());

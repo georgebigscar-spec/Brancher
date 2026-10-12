@@ -121,9 +121,11 @@ fn ref_row(ui: &mut Ui, r: &GitRef, current: Option<&str>, actions: &mut Vec<Act
     });
 }
 
-/// Контекстное меню строки истории; `current` — текущая ветка (для cherry-pick).
-pub fn commit_menu(response: &egui::Response, c: &Commit, current: Option<&str>, actions: &mut Vec<Action>) {
-    widgets::context_menu(response, 240.0, |ui| {
+/// Контекстное меню строки истории.
+pub fn commit_menu(response: &egui::Response, c: &Commit, repo: &RepoState, actions: &mut Vec<Action>) {
+    let current = repo.status.as_ref().and_then(|s| s.branch.as_deref());
+    let staged = repo.status.as_ref().is_some_and(|s| s.staged().next().is_some());
+    widgets::context_menu(response, 280.0, |ui| {
         let short: String = c.id.chars().take(10).collect();
         if widgets::menu_item(ui, "Создать ветку…", None).clicked() {
             open_new_branch(ui.ctx(), c.id.clone(), format!("{short} {}", c.subject));
@@ -142,14 +144,87 @@ pub fn commit_menu(response: &egui::Response, c: &Commit, current: Option<&str>,
         if widgets::menu_item(ui, "Revert", None).clicked() {
             actions.push(Action::Revert(c.id.clone()));
         }
-        if current.is_some() && widgets::menu_item(ui, "Interactive rebase отсюда…", None).clicked() {
-            actions.push(Action::PlanRebase(c.id.clone()));
+        // Правка коммитов текущей ветки; не из ветки — объяснит core.
+        if current.is_some() {
+            widgets::menu_separator(ui);
+            if widgets::menu_item(ui, "Изменить сообщение…", None).clicked() {
+                actions.push(Action::EditMessage(c.id.clone()));
+            }
+            let amend = ui.add_enabled_ui(staged, |ui| {
+                widgets::menu_item(ui, "Добавить проиндексированное сюда", None)
+            });
+            let amend = amend
+                .inner
+                .on_hover_text(
+                    "Проиндексированные изменения войдут в этот коммит, коммиты выше пересоздадутся",
+                )
+                .on_disabled_hover_text("Сначала проиндексируйте изменения (stage)");
+            if amend.clicked() {
+                actions.push(Action::AmendInto(c.id.clone()));
+            }
+            if widgets::menu_item(ui, "Отменить коммит", None)
+                .on_hover_text("Коммит исчезнет из ветки, его изменения вернутся в индекс")
+                .clicked()
+            {
+                actions.push(Action::Uncommit(c.id.clone()));
+            }
+            if widgets::menu_item(ui, "Interactive rebase отсюда…", None).clicked() {
+                actions.push(Action::PlanRebase(c.id.clone()));
+            }
         }
         widgets::menu_separator(ui);
         if widgets::menu_item(ui, "Копировать SHA", None).clicked() {
             ui.ctx().copy_text(c.id.clone());
         }
     });
+}
+
+/// Диалог нового сообщения коммита.
+pub fn message_dialog(ctx: &Context, repo: &RepoState, actions: &mut Vec<Action>) {
+    let Some((id, message)) = &repo.message_editor else {
+        return;
+    };
+    let subject = repo
+        .history
+        .iter()
+        .find(|c| c.id == *id)
+        .map(|c| c.subject.as_str())
+        .unwrap_or_default();
+    let short: String = id.chars().take(10).collect();
+    let resp = widgets::Dialog::new("message-editor", "Изменить сообщение")
+        .description(format!("{short} {subject}. Коммиты выше пересоздадутся."))
+        .width(560.0)
+        .show(ctx, |ui| {
+            let ok = match message {
+                None => {
+                    ui.spinner();
+                    false
+                }
+                Some(m) => {
+                    let mut text = m.clone();
+                    ui.add(
+                        widgets::Textarea::new(&mut text)
+                            .rows(6)
+                            .width(ui.available_width()),
+                    );
+                    if text != *m {
+                        actions.push(Action::SetEditedMessage(text.clone()));
+                    }
+                    !text.trim().is_empty()
+                }
+            };
+            widgets::footer(ui, |ui| {
+                let save = ui.add_enabled(ok, widgets::Button::new("Сохранить")).clicked();
+                let cancel = ui.add(widgets::Button::outline("Отмена")).clicked();
+                (save, cancel)
+            })
+        });
+    let (save, cancel) = resp.inner;
+    if save {
+        actions.push(Action::SaveMessage);
+    } else if cancel || resp.should_close {
+        actions.push(Action::CloseMessageEditor);
+    }
 }
 
 pub fn new_branch_dialog(ctx: &Context, actions: &mut Vec<Action>) {
