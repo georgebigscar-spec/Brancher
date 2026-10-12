@@ -121,6 +121,11 @@ pub enum Job {
     Merge(String),
     /// Перебазировать текущую ветку на ссылку.
     Rebase(String),
+    /// Пробное слияние с `target` перед merge или rebase: в каких файлах будут конфликты.
+    PreviewConflicts {
+        target: String,
+        rebase: bool,
+    },
     /// Interactive rebase по плану; `base` — `None` для rebase с корня истории.
     InteractiveRebase {
         base: Option<Oid>,
@@ -211,6 +216,7 @@ impl Job {
             Job::CherryPick { .. } => "cherry-pick",
             Job::Revert { .. } => "revert",
             Job::Merge(_) => "merge",
+            Job::PreviewConflicts { .. } => "preview",
             Job::Rebase(_) => "rebase",
             Job::InteractiveRebase { .. } => "rebase -i",
             Job::CommitMessage(_) => "message",
@@ -336,6 +342,13 @@ pub enum JobResult {
         result: Result<(Vec<Commit>, Vec<Commit>), JobError>,
     },
     Snapshots(Result<Vec<Snapshot>, JobError>),
+    /// Файлы, где merge или rebase на `target` даст конфликты; ошибка — проверить не удалось
+    /// (например, git старше 2.38).
+    ConflictPreview {
+        target: String,
+        rebase: bool,
+        result: Result<Vec<String>, JobError>,
+    },
     /// Absorb выполнен (ошибка приходит в [`JobResult::Finished`]).
     Absorbed(AbsorbReport),
     /// Файлы репозитория изменились снаружи (редактор, терминал) — нужно обновиться.
@@ -1703,7 +1716,10 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     });
                     vec![]
                 }
-                Action::Merge(target) => spawn(Job::Merge(target)),
+                Action::Merge(target) => spawn(Job::PreviewConflicts {
+                    target,
+                    rebase: false,
+                }),
                 Action::CherryPick(commit) => {
                     let mainline = repo.history.iter().any(|c| c.id == commit && c.is_merge());
                     spawn(Job::CherryPick { commit, mainline })
@@ -1713,26 +1729,19 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     spawn(Job::Revert { commit, mainline })
                 }
                 Action::Rebase(onto) => {
-                    let branch = repo.status.as_ref().and_then(|s| s.branch.clone());
-                    match branch {
-                        Some(branch) => {
-                            repo.confirm = Some(Confirm {
-                                title: format!("Перебазировать {branch} на {onto}?"),
-                                description: format!(
-                                    "Коммиты {branch}, которых нет в {onto}, будут пересозданы поверх \
-                                     {onto}. Если ветка уже отправлена, потом понадобится push с force."
-                                ),
-                                action: "Перебазировать".into(),
-                                job: Job::Rebase(onto),
-                            });
-                        }
-                        None => state.notifications.push(Notification {
+                    if repo.status.as_ref().is_some_and(|s| s.branch.is_some()) {
+                        spawn(Job::PreviewConflicts {
+                            target: onto,
+                            rebase: true,
+                        })
+                    } else {
+                        state.notifications.push(Notification {
                             severity: Severity::Info,
                             title: "Rebase недоступен".into(),
                             details: "HEAD не на ветке (detached).".into(),
-                        }),
+                        });
+                        vec![]
                     }
-                    vec![]
                 }
                 Action::PlanRebase(from) => {
                     match repo.plan_rebase(&from) {
@@ -2204,6 +2213,50 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
                 }
             }
         }
+        JobResult::ConflictPreview {
+            target,
+            rebase,
+            result,
+        } => {
+            // Ошибка пробного слияния (старый git) не мешает: операция идёт как раньше.
+            let files = result.unwrap_or_default();
+            let list = conflict_list(&files);
+            if rebase {
+                let branch = r
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.branch.clone())
+                    .unwrap_or_default();
+                let mut description = format!(
+                    "Коммиты {branch}, которых нет в {target}, будут пересозданы поверх {target}. \
+                     Если ветка уже отправлена, потом понадобится push с force."
+                );
+                if !files.is_empty() {
+                    description.push_str(&format!("\n\nВероятны конфликты в файлах:\n{list}"));
+                }
+                r.confirm = Some(Confirm {
+                    title: format!("Перебазировать {branch} на {target}?"),
+                    description,
+                    action: "Перебазировать".into(),
+                    job: Job::Rebase(target),
+                });
+            } else if files.is_empty() {
+                effects.push(Effect::Spawn {
+                    repo,
+                    job: Job::Merge(target),
+                });
+            } else {
+                r.confirm = Some(Confirm {
+                    title: format!("Слияние {target} даст конфликты"),
+                    description: format!(
+                        "Конфликты будут в файлах:\n{list}\n\nИх придётся разрешить вручную; \
+                         слияние можно прервать или откатить через «История»."
+                    ),
+                    action: "Всё равно слить".into(),
+                    job: Job::Merge(target),
+                });
+            }
+        }
         JobResult::Snapshots(result) => match result {
             Ok(list) => {
                 if r.oplog.is_some() {
@@ -2266,7 +2319,7 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
                     }
                     if job == "refresh" {
                         effects.extend(refresh_change_diff(r));
-                    } else if !matches!(job, "diff" | "blame" | "log" | "message" | "oplog") {
+                    } else if !matches!(job, "diff" | "blame" | "log" | "message" | "oplog" | "preview") {
                         effects.push(Effect::Spawn {
                             repo,
                             job: Job::Refresh { history_limit: limit },
@@ -2307,6 +2360,16 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
         state.notify_error(title, &e);
     }
     effects
+}
+
+/// Список файлов для подтверждения: первые 10 и сколько ещё.
+fn conflict_list(files: &[String]) -> String {
+    const SHOWN: usize = 10;
+    let mut list: Vec<String> = files.iter().take(SHOWN).map(|f| format!("• {f}")).collect();
+    if files.len() > SHOWN {
+        list.push(format!("и ещё {}", files.len() - SHOWN));
+    }
+    list.join("\n")
 }
 
 /// После обновления статуса diff файла рабочей копии мог устареть: перечитываем его,
@@ -3308,12 +3371,54 @@ mod tests {
             apply_result(s, id, JobResult::Status(Ok(status)));
         };
         set(&mut s, None, vec![]);
+        let preview = |s: &mut AppState, rebase, result| {
+            apply_result(
+                s,
+                id,
+                JobResult::ConflictPreview {
+                    target: "dev".into(),
+                    rebase,
+                    result,
+                },
+            )
+        };
+        // Merge — сначала пробное слияние; без конфликтов (или на старом git) идёт сразу.
         assert_eq!(
             spawned(reduce(&mut s, Action::Merge("dev".into()))),
+            Job::PreviewConflicts {
+                target: "dev".into(),
+                rebase: false
+            }
+        );
+        assert_eq!(
+            spawned(preview(&mut s, false, Ok(vec![]))),
             Job::Merge("dev".into())
         );
-        // Rebase — после подтверждения.
-        assert!(reduce(&mut s, Action::Rebase("dev".into())).is_empty());
+        let old_git = Err(JobError {
+            message: "unknown option".into(),
+            stderr: String::new(),
+        });
+        assert_eq!(spawned(preview(&mut s, false, old_git)), Job::Merge("dev".into()));
+        // С конфликтами — подтверждение со списком файлов.
+        assert!(preview(&mut s, false, Ok(vec!["a.txt".into()])).is_empty());
+        let confirm = s.active_repo().unwrap().confirm.clone().unwrap();
+        assert!(confirm.description.contains("• a.txt"));
+        assert_eq!(
+            spawned(reduce(&mut s, Action::Confirm(true))),
+            Job::Merge("dev".into())
+        );
+        // Rebase — после пробного слияния и подтверждения.
+        assert_eq!(
+            spawned(reduce(&mut s, Action::Rebase("dev".into()))),
+            Job::PreviewConflicts {
+                target: "dev".into(),
+                rebase: true
+            }
+        );
+        let many = (0..12).map(|i| format!("f{i}")).collect();
+        assert!(preview(&mut s, true, Ok(many)).is_empty());
+        let confirm = s.active_repo().unwrap().confirm.clone().unwrap();
+        assert!(confirm.description.contains("• f9\nи ещё 2"));
         assert!(s
             .active_repo()
             .unwrap()

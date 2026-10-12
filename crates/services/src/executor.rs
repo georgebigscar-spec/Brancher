@@ -99,6 +99,11 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
             Job::CherryPick { commit, mainline } => git.cherry_pick(repo, commit, *mainline, cancel)?,
             Job::Revert { commit, mainline } => git.revert(repo, commit, *mainline, cancel)?,
             Job::Merge(target) => git.merge(repo, target, cancel)?,
+            Job::PreviewConflicts { target, rebase } => emit(JobResult::ConflictPreview {
+                target: target.clone(),
+                rebase: *rebase,
+                result: git.merge_conflicts(repo, target, cancel).map_err(Into::into),
+            }),
             Job::Rebase(onto) => git.rebase(repo, onto, cancel)?,
             Job::InteractiveRebase { base, steps } => {
                 git.interactive_rebase(repo, base.as_deref(), steps, cancel)?
