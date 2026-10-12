@@ -14,7 +14,7 @@ pub use version::{GitVersion, MIN_GIT_VERSION};
 
 use std::path::Path;
 
-use brancher_core::{CloneProgress, Commit, DiffTarget, FileDiff, GitRef, RepoStatus};
+use brancher_core::{Commit, DiffTarget, FileDiff, GitRef, Progress, RepoStatus};
 
 /// Высокоуровневые операции поверх [`Runner`].
 #[derive(Debug, Clone)]
@@ -152,20 +152,66 @@ impl Git {
         self.run_args(repo, &commands::branch::delete_args(name, force), None, cancel)
     }
 
+    pub fn fetch(
+        &self,
+        repo: &Path,
+        cancel: &CancelToken,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> Result<(), GitError> {
+        self.run_progress(repo, &commands::remote::fetch_args(), cancel, on_progress)
+    }
+
+    pub fn pull(
+        &self,
+        repo: &Path,
+        cancel: &CancelToken,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> Result<(), GitError> {
+        self.run_progress(repo, &commands::remote::pull_args(), cancel, on_progress)
+    }
+
+    pub fn push(
+        &self,
+        repo: &Path,
+        set_upstream: Option<(&str, &str)>,
+        cancel: &CancelToken,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> Result<(), GitError> {
+        let args = commands::remote::push_args(set_upstream);
+        self.run_progress(repo, &args, cancel, on_progress)
+    }
+
+    fn run_progress(
+        &self,
+        repo: &Path,
+        args: &[String],
+        cancel: &CancelToken,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> Result<(), GitError> {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.runner
+            .run_with_progress(Some(repo), &args, cancel, &mut |line| {
+                if let Some(p) = commands::progress::parse_progress(line) {
+                    on_progress(p);
+                }
+            })
+            .map(|_| ())
+    }
+
     /// Клонирует `url` в `dest`, передавая этапы прогресса в `on_progress`.
     pub fn clone_repo(
         &self,
         url: &str,
         dest: &Path,
         cancel: &CancelToken,
-        on_progress: &mut dyn FnMut(CloneProgress),
+        on_progress: &mut dyn FnMut(Progress),
     ) -> Result<(), GitError> {
         let dest = dest.to_string_lossy();
         let args = commands::clone::args(url, &dest);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         self.runner
             .run_with_progress(None, &args, cancel, &mut |line| {
-                if let Some(p) = commands::clone::parse_progress(line) {
+                if let Some(p) = commands::progress::parse_progress(line) {
                     on_progress(p);
                 }
             })

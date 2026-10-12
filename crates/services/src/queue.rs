@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use brancher_core::{Job, JobResult, RepoId};
 use brancher_git::{CancelToken, Git};
 
+use crate::askpass::AskpassServer;
 use crate::execute;
 use crate::watch::{self, Activity, RepoWatcher};
 
@@ -19,6 +20,8 @@ pub type Completed = (RepoId, JobResult);
 struct Worker {
     tx: Sender<Job>,
     cancel: CancelToken,
+    /// Отмена только текущей задачи (fetch, push…), очередь продолжает работу.
+    current: Arc<Mutex<CancelToken>>,
     handle: Option<JoinHandle<()>>,
     /// `None` — наблюдение недоступно (например, исчерпан лимит inotify); остаётся F5.
     _watcher: Option<RepoWatcher>,
@@ -35,6 +38,8 @@ pub struct Jobs {
     clone: Option<CancelToken>,
     /// Очередь потока клонирования; создаётся при первом клоне.
     clone_tx: Option<Sender<CloneRequest>>,
+    /// Логины и пароли для git; `None` — не удалось открыть порт, git спросит в терминале.
+    askpass: Option<AskpassServer>,
 }
 
 struct CloneRequest {
@@ -64,8 +69,14 @@ fn clone_one(git: &Git, req: CloneRequest, send: &dyn Fn(JobResult)) {
 }
 
 impl Jobs {
-    pub fn new(git: Git, repaint: Repaint) -> Self {
+    pub fn new(mut git: Git, repaint: Repaint) -> Self {
         let (results_tx, results_rx) = mpsc::channel();
+        let askpass = AskpassServer::start(results_tx.clone(), repaint.clone())
+            .map_err(|e| eprintln!("askpass недоступен: {e}"))
+            .ok();
+        if let Some(a) = &askpass {
+            git.runner.env.extend(a.env());
+        }
         Self {
             git,
             workers: HashMap::new(),
@@ -74,6 +85,7 @@ impl Jobs {
             repaint,
             clone: None,
             clone_tx: None,
+            askpass,
         }
     }
 
@@ -94,22 +106,28 @@ impl Jobs {
         )
         .map_err(|e| eprintln!("наблюдение за {} недоступно: {e}", path.display()))
         .ok();
-        let (git, out, repaint, c) = (
+        let current = Arc::new(Mutex::new(CancelToken::new()));
+        let (git, out, repaint, c, cur) = (
             self.git.clone(),
             self.results_tx.clone(),
             self.repaint.clone(),
             cancel.clone(),
+            current.clone(),
         );
         let handle = thread::Builder::new()
             .name(format!("repo-{}", id.0))
             .spawn(move || {
                 for job in rx {
+                    // TODO: вынести чтения в общий пул (раздел 3).
+                    // Сначала токен задачи, потом проверка: stop_repo отменяет оба по очереди,
+                    // поэтому закрытие вкладки не проскочит между ними.
+                    let job_cancel = CancelToken::new();
+                    *cur.lock().unwrap_or_else(|e| e.into_inner()) = job_cancel.clone();
                     if c.is_cancelled() {
                         break;
                     }
-                    // TODO: вынести чтения в общий пул (раздел 3).
                     activity.begin();
-                    execute(&git, &path, &job, &c, &mut |r| {
+                    execute(&git, &path, &job, &job_cancel, &mut |r| {
                         let _ = out.send((id, r));
                         repaint();
                     });
@@ -122,6 +140,7 @@ impl Jobs {
             Worker {
                 tx,
                 cancel,
+                current,
                 handle: Some(handle),
                 _watcher: watcher,
             },
@@ -137,9 +156,24 @@ impl Jobs {
     pub fn stop_repo(&mut self, id: RepoId) {
         if let Some(w) = self.workers.remove(&id) {
             w.cancel.cancel();
+            w.current.lock().unwrap_or_else(|e| e.into_inner()).cancel();
             drop(w.tx);
             // Не ждём join: git будет убит, поток завершится сам.
             drop(w.handle);
+        }
+    }
+
+    /// Отменяет задачу, которая выполняется сейчас (fetch, pull, push); очередь продолжает работу.
+    pub fn cancel_job(&self, id: RepoId) {
+        if let Some(w) = self.workers.get(&id) {
+            w.current.lock().unwrap_or_else(|e| e.into_inner()).cancel();
+        }
+    }
+
+    /// Ответ пользователя на запрос логина или пароля; `None` — отмена.
+    pub fn answer_prompt(&self, id: u64, answer: Option<String>) {
+        if let Some(a) = &self.askpass {
+            a.answer(id, answer);
         }
     }
 

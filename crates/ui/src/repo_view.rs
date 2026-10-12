@@ -67,7 +67,7 @@ fn toolbar(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
                 ui.add(widgets::Badge::new(format!("↑{} ↓{}", s.ahead, s.behind)).outline());
             }
         }
-        if repo.busy > 0 {
+        if repo.busy > 0 && repo.progress.is_none() {
             ui.spinner();
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -78,8 +78,56 @@ fn toolbar(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
             {
                 actions.push(Action::Refresh);
             }
+            remote_buttons(ui, repo, actions);
         });
     });
+}
+
+/// Fetch, pull и push; во время сетевой задачи — её этап и «Отмена».
+/// Макет справа налево: кнопки идут в обратном порядке.
+fn remote_buttons(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
+    if let Some(p) = &repo.progress {
+        if ui.add(widgets::Button::outline("Отмена")).clicked() {
+            actions.push(Action::CancelJob);
+        }
+        if let Some(n) = p.percent {
+            ui.add(widgets::Progress::new(f32::from(n) / 100.0).width(120.0));
+        }
+        let phase = crate::phase_name(&p.phase);
+        let text = match p.percent {
+            Some(n) => format!("{phase}: {n}%"),
+            None => format!("{phase}…"),
+        };
+        ui.spinner();
+        widgets::muted(ui, text);
+        return;
+    }
+    let (ahead, behind) = repo.status.as_ref().map_or((0, 0), |s| (s.ahead, s.behind));
+    let label = |name: &str, n: u32, arrow: &str| match n {
+        0 => name.to_owned(),
+        n => format!("{name} {arrow}{n}"),
+    };
+    if ui
+        .add(widgets::Button::outline(label("Push", ahead, "↑")))
+        .on_hover_text("Отправить текущую ветку; без upstream — на origin с -u")
+        .clicked()
+    {
+        actions.push(Action::Push);
+    }
+    if ui
+        .add(widgets::Button::outline(label("Pull", behind, "↓")))
+        .on_hover_text("Забрать изменения текущей ветки (только перемотка вперёд)")
+        .clicked()
+    {
+        actions.push(Action::Pull);
+    }
+    if ui
+        .add(widgets::Button::outline("Fetch"))
+        .on_hover_text("Получить изменения всех remotes")
+        .clicked()
+    {
+        actions.push(Action::Fetch);
+    }
 }
 
 /// Виртуальная прокрутка: рисуются только видимые строки (NFR-03).

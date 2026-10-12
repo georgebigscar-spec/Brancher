@@ -14,6 +14,8 @@ use widgets::Theme;
 /// Локальное состояние UI, которое не относится к модели (тексты полей ввода).
 #[derive(Default)]
 pub struct BrancherUi {
+    /// Ввод для вопроса git (логин, пароль); очищается после ответа.
+    prompt_answer: String,
     welcome: welcome::Form,
 }
 
@@ -46,6 +48,9 @@ impl BrancherUi {
                     Some(repo) => repo_view::show(ui, repo, &state.settings, &mut actions),
                 }
             });
+        if let Some(p) = state.prompts.front() {
+            prompt_dialog(&ctx, p, &mut self.prompt_answer, &mut actions);
+        }
         shortcuts(&ctx, state, &mut actions);
         actions
     }
@@ -84,6 +89,44 @@ impl BrancherUi {
     }
 }
 
+/// Вопрос git или ssh: логин, пароль, passphrase, подтверждение ключа хоста.
+fn prompt_dialog(
+    ctx: &egui::Context,
+    p: &brancher_core::Prompt,
+    answer: &mut String,
+    actions: &mut Vec<Action>,
+) {
+    let resp = widgets::Dialog::new(("git-prompt", p.id), "Git запрашивает данные")
+        .description(p.text.trim())
+        .show(ctx, |ui| {
+            let mut input = widgets::Input::new(answer).width(ui.available_width());
+            if p.secret {
+                input = input.password();
+            }
+            let r = ui.add(input);
+            if !r.has_focus() && !ui.ctx().memory(|m| m.focused().is_some()) {
+                r.request_focus();
+            }
+            widgets::muted(
+                ui,
+                "Ответ уйдёт только в git. Сохранить его может ваш credential helper.",
+            );
+            widgets::footer(ui, |ui| {
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let ok = ui.add(widgets::Button::new("OK")).clicked() || enter;
+                let cancel = ui.add(widgets::Button::outline("Отмена")).clicked();
+                (ok, cancel)
+            })
+        });
+    let (ok, cancel) = resp.inner;
+    if ok {
+        actions.push(Action::AnswerPrompt(Some(std::mem::take(answer))));
+    } else if cancel || resp.should_close {
+        answer.clear();
+        actions.push(Action::AnswerPrompt(None));
+    }
+}
+
 fn notifications(ui: &mut Ui, state: &AppState, actions: &mut Vec<Action>) {
     for (i, n) in state.notifications.iter().enumerate() {
         ui.horizontal(|ui| {
@@ -91,7 +134,9 @@ fn notifications(ui: &mut Ui, state: &AppState, actions: &mut Vec<Action>) {
             if n.severity == Severity::Error {
                 alert = alert.destructive();
             }
-            alert.show(ui);
+            // Место под кнопки справа; длинный stderr переносится, а не раздвигает окно.
+            let width = (ui.available_width() - 190.0).max(200.0);
+            ui.allocate_ui(egui::vec2(width, 0.0), |ui| alert.show(ui));
             if ui.small_button("Копировать").clicked() {
                 ui.ctx().copy_text(format!("{}\n{}", n.title, n.details));
             }
@@ -116,5 +161,22 @@ fn shortcuts(ctx: &egui::Context, state: &AppState, actions: &mut Vec<Action>) {
         if pressed(Modifiers::NONE, Key::F5) {
             actions.push(Action::Refresh);
         }
+    }
+}
+
+/// Этапы `git … --progress` (clone, fetch, push) по-русски; незнакомые (другая локаль git, сообщения сервера) — как есть.
+pub(crate) fn phase_name(phase: &str) -> &str {
+    match phase {
+        "" => "Подключение",
+        p if p.starts_with("Cloning into") => "Подключение",
+        "Enumerating objects" | "Counting objects" | "Compressing objects" => "Подготовка на сервере",
+        "Receiving objects" => "Загрузка объектов",
+        "Resolving deltas" => "Разбор изменений",
+        "Updating files" | "Checking out files" => "Распаковка файлов",
+        "Writing objects" => "Отправка объектов",
+        p if p.starts_with("Delta compression") => "Сжатие",
+        p if p.starts_with("Fetching ") => "Получение изменений",
+        p if p.starts_with("To ") || p.starts_with("From ") => "Обмен с сервером",
+        p => p,
     }
 }

@@ -16,13 +16,21 @@ use brancher_services::Jobs;
 use brancher_ui::BrancherUi;
 
 fn main() -> eframe::Result {
-    // Helper-режим (`brancher askpass`, `brancher editor`) для GIT_ASKPASS и GIT_SEQUENCE_EDITOR
-    // появится вместе с IPC (NFR-09); пока просто отказываемся, чтобы git не завис.
-    if let Some(mode) = std::env::args()
-        .nth(1)
-        .filter(|a| a == "askpass" || a == "editor")
-    {
-        eprintln!("helper-режим `{mode}` ещё не реализован");
+    // Helper-режим askpass (NFR-09): git или ssh запустили нас с вопросом в аргументе,
+    // ответ берём у основного окна и печатаем в stdout. Окно в этом режиме не открывается.
+    if let Ok(value) = std::env::var(brancher_services::askpass::ENV) {
+        let prompt = std::env::args().nth(1).unwrap_or_default();
+        match brancher_services::askpass::ask(&value, &prompt) {
+            Some(answer) => {
+                println!("{answer}");
+                std::process::exit(0);
+            }
+            None => std::process::exit(1),
+        }
+    }
+    // GIT_SEQUENCE_EDITOR (интерактивный rebase) появится вместе с rebase; пока отказываемся.
+    if std::env::args().nth(1).is_some_and(|a| a == "editor") {
+        eprintln!("helper-режим `editor` ещё не реализован");
         std::process::exit(1);
     }
 
@@ -96,6 +104,8 @@ impl App {
                 Effect::StopRepo(id) => jobs.stop_repo(id),
                 Effect::Clone { id, url, dest } => jobs.clone_repo(id, url, dest),
                 Effect::CancelClone => jobs.cancel_clone(),
+                Effect::CancelJob(repo) => jobs.cancel_job(repo),
+                Effect::AnswerPrompt { id, answer } => jobs.answer_prompt(id, answer),
                 Effect::Spawn { repo, job } => {
                     if jobs.spawn(repo, job) {
                         job_started(&mut self.state, repo);
