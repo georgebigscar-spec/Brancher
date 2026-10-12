@@ -1,7 +1,7 @@
 //! Вкладка репозитория: ветки слева, история в центре, изменения и коммит справа.
 //! Граф коммитов рисует [`crate::graph`]; diff и blame — следующие шаги MVP.
 
-use brancher_core::{Action, Change, Commit, DiffTarget, RefKind, RepoState, Settings};
+use brancher_core::{Action, Change, Commit, DiffTarget, RepoState, Settings};
 use egui::{RichText, Ui};
 
 const ROW_HEIGHT: f32 = 24.0;
@@ -21,6 +21,7 @@ pub fn show(ui: &mut Ui, repo: &RepoState, settings: &Settings, actions: &mut Ve
             actions.push(Action::Confirm(yes));
         }
     }
+    crate::branches::new_branch_dialog(ui.ctx(), actions);
     toolbar(ui, repo, actions);
     ui.separator();
     let height = ui.available_height();
@@ -28,7 +29,7 @@ pub fn show(ui: &mut Ui, repo: &RepoState, settings: &Settings, actions: &mut Ve
         ui.vertical(|ui| {
             ui.set_width(220.0);
             ui.set_min_height(height);
-            refs(ui, repo);
+            crate::branches::refs(ui, repo, actions);
         });
         ui.separator();
         let side = 340.0;
@@ -81,31 +82,6 @@ fn toolbar(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
     });
 }
 
-fn refs(ui: &mut Ui, repo: &RepoState) {
-    egui::ScrollArea::vertical().id_salt("refs").show(ui, |ui| {
-        for (title, kind) in [
-            ("Ветки", RefKind::LocalBranch),
-            ("Remotes", RefKind::RemoteBranch),
-            ("Теги", RefKind::Tag),
-        ] {
-            ui.label(RichText::new(title).strong());
-            for r in repo.refs.iter().filter(|r| r.kind == kind) {
-                let mut text = r.name.clone();
-                if r.ahead > 0 || r.behind > 0 {
-                    text.push_str(&format!("  ↑{} ↓{}", r.ahead, r.behind));
-                }
-                let label = if r.is_head {
-                    RichText::new(text).strong()
-                } else {
-                    RichText::new(text)
-                };
-                ui.label(label);
-            }
-            ui.add_space(8.0);
-        }
-    });
-}
-
 /// Виртуальная прокрутка: рисуются только видимые строки (NFR-03).
 fn history(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
     if repo.history.is_empty() {
@@ -129,6 +105,7 @@ fn history(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
                 if response.clicked() {
                     actions.push(Action::SelectCommit(Some(c.id.clone())));
                 }
+                crate::branches::commit_menu(&response, c);
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }

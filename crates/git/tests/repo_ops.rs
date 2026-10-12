@@ -302,3 +302,47 @@ fn missing_git_binary_is_spawn_error() {
         .unwrap_err();
     assert!(matches!(err, GitError::Spawn(_)));
 }
+
+#[test]
+fn create_switch_track_and_delete_branches() {
+    let repo = TempRepo::new("branches");
+    let (g, c) = (git(), CancelToken::new());
+    let p = repo.path();
+    repo.write("a.txt", "a\n");
+    g.stage(p, &["a.txt".into()], &c).unwrap();
+    g.commit(p, "init", false, &c).unwrap();
+    // Remote без сети: достаточно настроенного origin и его ссылки.
+    let run = |args: &[&str]| {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(p)
+            .status()
+            .unwrap()
+            .success());
+    };
+    run(&["remote", "add", "origin", "https://example.invalid/r.git"]);
+    run(&["update-ref", "refs/remotes/origin/feature", "HEAD"]);
+
+    let head = |g: &Git| g.status(p, &c).unwrap().branch;
+    g.create_branch(p, "dev", "main", false, &c).unwrap();
+    assert_eq!(head(&g).as_deref(), Some("main"));
+    g.create_branch(p, "topic/x", "main", true, &c).unwrap();
+    assert_eq!(head(&g).as_deref(), Some("topic/x"));
+    g.switch(p, "dev", &c).unwrap();
+    assert_eq!(head(&g).as_deref(), Some("dev"));
+
+    g.switch_track(p, "origin/feature", &c).unwrap();
+    let refs = g.refs(p, &c).unwrap();
+    let feature = refs
+        .iter()
+        .find(|r| r.kind == RefKind::LocalBranch && r.name == "feature")
+        .expect("локальная feature создана");
+    assert!(feature.is_head);
+    assert_eq!(feature.upstream.as_deref(), Some("refs/remotes/origin/feature"));
+
+    // --no-guess: несуществующая локальная ветка не создаётся из remote неявно.
+    assert!(matches!(g.switch(p, "nope", &c), Err(GitError::Failed { .. })));
+    g.delete_branch(p, "topic/x", true, &c).unwrap();
+    let names: Vec<_> = g.refs(p, &c).unwrap().into_iter().map(|r| r.name).collect();
+    assert!(!names.contains(&"topic/x".to_owned()), "{names:?}");
+}

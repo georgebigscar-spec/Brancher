@@ -31,6 +31,14 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
                 cached,
                 reverse,
             } => git.apply(repo, patch, *cached, *reverse, cancel)?,
+            Job::Switch(branch) => git.switch(repo, branch, cancel)?,
+            Job::SwitchTrack(remote) => git.switch_track(repo, remote, cancel)?,
+            Job::CreateBranch {
+                name,
+                start,
+                checkout,
+            } => git.create_branch(repo, name, start, *checkout, cancel)?,
+            Job::DeleteBranch(name) => git.delete_branch(repo, name, true, cancel)?,
             Job::Diff(target) => {
                 let diff = git.diff(repo, target, cancel).map(|mut files| {
                     crate::highlight::highlight(&mut files);

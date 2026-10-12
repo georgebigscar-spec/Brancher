@@ -25,7 +25,7 @@ pub use data_table::{Column, DataTable, DataTableResponse};
 pub use form::{radio_group, toggle_group, Checkbox, Input, RadioItem, Slider, Switch, Textarea, Toggle};
 pub use layout::{tabs, Accordion, Alert, Card, Table};
 pub use overlay::{
-    alert_dialog, confirm_dialog, dropdown_menu, footer, menu_checkbox, menu_item, menu_label,
+    alert_dialog, confirm_dialog, context_menu, dropdown_menu, footer, menu_checkbox, menu_item, menu_label,
     menu_separator, popover, toast, toast_error, Dialog, DialogResponse, Select, Toaster, TooltipExt,
 };
 pub use theme::{mix, paint_focus_ring, Theme};

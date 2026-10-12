@@ -37,6 +37,18 @@ pub enum Job {
         cached: bool,
         reverse: bool,
     },
+    /// Переключиться на локальную ветку.
+    Switch(String),
+    /// Создать локальную ветку, следящую за remote-веткой (`origin/x`), и переключиться.
+    SwitchTrack(String),
+    CreateBranch {
+        name: String,
+        /// Коммит или ссылка, от которой создаётся ветка.
+        start: String,
+        checkout: bool,
+    },
+    /// Удалить локальную ветку, даже не слитую (после подтверждения).
+    DeleteBranch(String),
 }
 
 impl Job {
@@ -55,6 +67,9 @@ impl Job {
             Job::ApplyPatch { cached: false, .. } => "discard-lines",
             Job::ApplyPatch { reverse: false, .. } => "stage-lines",
             Job::ApplyPatch { reverse: true, .. } => "unstage-lines",
+            Job::Switch(_) | Job::SwitchTrack(_) => "switch",
+            Job::CreateBranch { .. } => "branch",
+            Job::DeleteBranch(_) => "delete-branch",
         }
     }
 }
@@ -153,6 +168,17 @@ pub enum Action {
     DismissNotification(usize),
     SetSideBySide(bool),
     SetDarkTheme(bool),
+    /// Переключиться на локальную ветку по короткому имени.
+    SwitchBranch(String),
+    /// Переключиться на remote-ветку (`origin/x`): на локальную `x`, а если её нет — создать.
+    CheckoutRemote(String),
+    CreateBranch {
+        name: String,
+        start: String,
+        checkout: bool,
+    },
+    /// Удалить локальную ветку (спрашивает подтверждение).
+    DeleteBranch(String),
     /// Восстановить вкладки и настройки прошлого запуска.
     Restore(Session),
     /// Клонировать `url` в папку `dest` (её создаст git) и открыть результат.
@@ -426,6 +452,28 @@ pub struct Session {
     pub settings: Settings,
 }
 
+/// Почему имя не годится для ветки (упрощённые правила `git check-ref-format`), или `None`.
+pub fn branch_name_error(name: &str) -> Option<&'static str> {
+    const BAD: [char; 9] = [' ', '~', '^', ':', '?', '*', '[', '\\', '\x7f'];
+    if name.is_empty() {
+        Some("Введите имя ветки")
+    } else if name.starts_with('-') {
+        Some("Имя не может начинаться с «-»")
+    } else if name == "@" || name == "HEAD" {
+        Some("Это имя зарезервировано git")
+    } else if name.chars().any(|c| c.is_control() || BAD.contains(&c)) {
+        Some("Пробелы и символы ~ ^ : ? * [ \\ недопустимы")
+    } else if name.contains("..") || name.contains("@{") || name.contains("//") {
+        Some("Недопустимы «..», «@{» и «//»")
+    } else if name.starts_with('/') || name.ends_with('/') || name.ends_with('.') || name.ends_with(".lock") {
+        Some("Имя не может начинаться с «/» или заканчиваться на «/», «.», «.lock»")
+    } else if name.split('/').any(|part| part.starts_with('.')) {
+        Some("Части имени не могут начинаться с «.»")
+    } else {
+        None
+    }
+}
+
 /// Сколько недавних репозиториев помнить.
 pub const RECENT_LIMIT: usize = 20;
 
@@ -682,6 +730,66 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                             vec![]
                         }
                     }
+                }
+                Action::SwitchBranch(name) => spawn(Job::Switch(name)),
+                Action::CheckoutRemote(remote) => {
+                    // `origin/feature` → `feature`; если такая локальная ветка уже есть — на неё.
+                    let local = remote.split_once('/').map_or(remote.as_str(), |(_, b)| b);
+                    let exists = repo
+                        .refs
+                        .iter()
+                        .any(|r| r.kind == RefKind::LocalBranch && r.name == local);
+                    if exists {
+                        spawn(Job::Switch(local.to_owned()))
+                    } else {
+                        spawn(Job::SwitchTrack(remote))
+                    }
+                }
+                Action::CreateBranch {
+                    name,
+                    start,
+                    checkout,
+                } => {
+                    let name = name.trim().to_owned();
+                    let exists = repo
+                        .refs
+                        .iter()
+                        .any(|r| r.kind == RefKind::LocalBranch && r.name == name);
+                    let error = branch_name_error(&name)
+                        .map(str::to_owned)
+                        .or_else(|| exists.then(|| format!("Ветка {name} уже есть")));
+                    match error {
+                        Some(details) => {
+                            state.notifications.push(Notification {
+                                severity: Severity::Info,
+                                title: "Ветка не создана".into(),
+                                details,
+                            });
+                            vec![]
+                        }
+                        None => spawn(Job::CreateBranch {
+                            name,
+                            start,
+                            checkout,
+                        }),
+                    }
+                }
+                Action::DeleteBranch(name) => {
+                    let branch = repo
+                        .refs
+                        .iter()
+                        .find(|r| r.kind == RefKind::LocalBranch && r.name == name);
+                    if let Some(b) = branch.filter(|b| !b.is_head) {
+                        repo.confirm = Some(Confirm {
+                            title: format!("Удалить ветку {name}?"),
+                            description: "Если её коммитов нет в других ветках, найти их потом \
+                                          можно будет только через reflog."
+                                .into(),
+                            action: "Удалить".into(),
+                            job: Job::DeleteBranch(b.name.clone()),
+                        });
+                    }
+                    vec![]
                 }
                 Action::Confirm(yes) => match repo.confirm.take() {
                     Some(c) if yes => {
@@ -1585,5 +1693,102 @@ mod tests {
         open(&mut s, "/new");
         assert_eq!(s.recent.len(), RECENT_LIMIT);
         assert_eq!(s.recent[0].path, PathBuf::from("/new"));
+    }
+
+    fn branch(name: &str, kind: RefKind, head: bool) -> GitRef {
+        GitRef {
+            name: name.into(),
+            full_name: String::new(),
+            kind,
+            target: "abc".into(),
+            is_head: head,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            upstream_gone: false,
+        }
+    }
+
+    fn with_branches() -> (AppState, RepoId) {
+        let mut s = AppState::new();
+        let id = open(&mut s, "/a");
+        apply_result(
+            &mut s,
+            id,
+            JobResult::Refs(Ok(vec![
+                branch("main", RefKind::LocalBranch, true),
+                branch("dev", RefKind::LocalBranch, false),
+                branch("origin/dev", RefKind::RemoteBranch, false),
+                branch("origin/feature/x", RefKind::RemoteBranch, false),
+            ])),
+        );
+        (s, id)
+    }
+
+    #[test]
+    fn checkout_remote_reuses_existing_local_branch() {
+        let (mut s, id) = with_branches();
+        let job = |s: &mut AppState, a| match &reduce(s, a)[..] {
+            [Effect::Spawn { repo, job }] if *repo == id => job.clone(),
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(
+            job(&mut s, Action::SwitchBranch("dev".into())),
+            Job::Switch("dev".into())
+        );
+        assert_eq!(
+            job(&mut s, Action::CheckoutRemote("origin/dev".into())),
+            Job::Switch("dev".into())
+        );
+        assert_eq!(
+            job(&mut s, Action::CheckoutRemote("origin/feature/x".into())),
+            Job::SwitchTrack("origin/feature/x".into())
+        );
+    }
+
+    #[test]
+    fn create_branch_validates_name() {
+        let (mut s, _) = with_branches();
+        let create = |name: &str| Action::CreateBranch {
+            name: name.into(),
+            start: "abc".into(),
+            checkout: true,
+        };
+        assert!(reduce(&mut s, create("bad name")).is_empty());
+        assert!(reduce(&mut s, create("dev")).is_empty());
+        assert_eq!(s.notifications.len(), 2);
+        assert!(s.notifications[1].details.contains("уже есть"));
+        let fx = reduce(&mut s, create(" feature/y "));
+        assert!(matches!(
+            &fx[..],
+            [Effect::Spawn { job: Job::CreateBranch { name, .. }, .. }] if name == "feature/y"
+        ));
+    }
+
+    #[test]
+    fn branch_names() {
+        for ok in ["main", "feature/x-1", "v1.2", "юникод"] {
+            assert_eq!(branch_name_error(ok), None, "{ok}");
+        }
+        for bad in [
+            "", "-x", "a b", "a..b", "a/", "/a", "a.lock", "x/.y", "a~1", "HEAD", "a@{1}",
+        ] {
+            assert!(branch_name_error(bad).is_some(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn delete_branch_asks_first_and_never_deletes_current() {
+        let (mut s, id) = with_branches();
+        assert!(reduce(&mut s, Action::DeleteBranch("main".into())).is_empty());
+        assert!(s.active_repo().unwrap().confirm.is_none());
+        assert!(reduce(&mut s, Action::DeleteBranch("dev".into())).is_empty());
+        assert_eq!(
+            reduce(&mut s, Action::Confirm(true)),
+            [Effect::Spawn {
+                repo: id,
+                job: Job::DeleteBranch("dev".into())
+            }]
+        );
     }
 }
