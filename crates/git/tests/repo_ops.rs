@@ -133,6 +133,7 @@ fn diffs_for_commits_and_working_tree() {
         path: path.into(),
         staged,
         untracked,
+        conflicted: false,
     };
 
     // Untracked: сравнение с пустым файлом через --no-index (код выхода 1 — не ошибка).
@@ -204,6 +205,7 @@ fn partial_stage_and_unstage_by_lines() {
         path: "f.txt".into(),
         staged,
         untracked: false,
+        conflicted: false,
     };
     let cached = |g: &Git| {
         let out = g
@@ -264,6 +266,7 @@ fn partial_stage_and_unstage_by_lines() {
         path: "new.txt".into(),
         staged: false,
         untracked: true,
+        conflicted: false,
     };
     let d = g.diff(repo.path(), &untracked, &c).unwrap();
     let p = patch::build(&d[0], &BTreeSet::from([(0, 1)]), false).unwrap();
@@ -455,4 +458,53 @@ fn stash_push_list_apply_pop_and_drop() {
     assert_eq!(g.stashes(p, &c).unwrap().len(), 1);
     g.stash_drop(p, 0, &list[0].id, &c).unwrap();
     assert!(g.stashes(p, &c).unwrap().is_empty());
+}
+
+#[test]
+fn merge_and_rebase_with_conflicts() {
+    use brancher_core::Operation;
+    let repo = TempRepo::new("merge");
+    let (g, c) = (git(), CancelToken::new());
+    let p = repo.path();
+    let commit = |file: &str, text: &str, msg: &str| {
+        repo.write(file, text);
+        g.stage(p, &[file.into()], &c).unwrap();
+        g.commit(p, msg, false, &c).unwrap();
+    };
+    commit("a.txt", "base\n", "init");
+    g.create_branch(p, "dev", "main", true, &c).unwrap();
+    commit("a.txt", "dev\n", "dev");
+    commit("b.txt", "b\n", "dev b");
+    g.switch(p, "main", &c).unwrap();
+    commit("a.txt", "main\n", "main");
+
+    // Merge останавливается на конфликте, но это не ошибка.
+    g.merge(p, "dev", &c).unwrap();
+    let s = g.status(p, &c).unwrap();
+    assert_eq!(s.operation, Some(Operation::Merge));
+    let conflicts: Vec<_> = s.conflicts().map(|c| c.path.as_str()).collect();
+    assert_eq!(conflicts, ["a.txt"]);
+
+    g.resolve_with(p, "a.txt", false, &c).unwrap();
+    assert_eq!(fs::read_to_string(p.join("a.txt")).unwrap(), "dev\n");
+    g.continue_operation(p, Operation::Merge, &c).unwrap();
+    let s = g.status(p, &c).unwrap();
+    assert_eq!(s.operation, None);
+    assert!(s.changes.is_empty());
+    assert!(g.log(p, 10, &c).unwrap()[0].is_merge());
+
+    // Rebase с конфликтом и отмена.
+    g.create_branch(p, "topic", "main~1", true, &c).unwrap();
+    commit("a.txt", "topic\n", "topic");
+    let before = g.status(p, &c).unwrap().head;
+    g.rebase(p, "main", &c).unwrap();
+    let s = g.status(p, &c).unwrap();
+    assert_eq!(s.operation, Some(Operation::Rebase));
+    assert_eq!(s.rebase_step, Some((1, 1)));
+    g.abort_operation(p, Operation::Rebase, &c).unwrap();
+    let s = g.status(p, &c).unwrap();
+    assert_eq!((s.operation, s.head), (None, before));
+
+    // Ошибка, не связанная с конфликтами, остаётся ошибкой.
+    assert!(g.merge(p, "nope", &c).is_err());
 }

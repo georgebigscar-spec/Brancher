@@ -135,6 +135,26 @@ pub struct Stash {
     pub message: String,
 }
 
+/// Незавершённая операция git, которая ждёт разрешения конфликтов.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+impl Operation {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Rebase => "rebase",
+            Self::CherryPick => "cherry-pick",
+            Self::Revert => "revert",
+        }
+    }
+}
+
 /// Результат `git status`: текущая ветка и изменения.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RepoStatus {
@@ -146,6 +166,10 @@ pub struct RepoStatus {
     pub ahead: u32,
     pub behind: u32,
     pub changes: Vec<Change>,
+    /// Идёт merge, rebase, cherry-pick или revert.
+    pub operation: Option<Operation>,
+    /// Шаг rebase: `(текущий, всего)`.
+    pub rebase_step: Option<(u32, u32)>,
 }
 
 impl RepoStatus {
@@ -153,6 +177,9 @@ impl RepoStatus {
         self.changes
             .iter()
             .filter(|c| c.staged.is_some() && !c.is_conflicted())
+    }
+    pub fn conflicts(&self) -> impl Iterator<Item = &Change> {
+        self.changes.iter().filter(|c| c.is_conflicted())
     }
     pub fn unstaged(&self) -> impl Iterator<Item = &Change> {
         self.changes

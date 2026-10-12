@@ -12,9 +12,9 @@ mod version;
 pub use runner::{CancelToken, GitError, Output, Runner};
 pub use version::{GitVersion, MIN_GIT_VERSION};
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use brancher_core::{Commit, DiffTarget, FileDiff, GitRef, Progress, RepoStatus, Stash};
+use brancher_core::{Commit, DiffTarget, FileDiff, GitRef, Operation, Progress, RepoStatus, Stash};
 
 /// Высокоуровневые операции поверх [`Runner`].
 #[derive(Debug, Clone)]
@@ -43,7 +43,70 @@ impl Git {
         let out = self
             .runner
             .run(Some(repo), &commands::status::args(), None, cancel)?;
-        commands::status::parse(&out.stdout)
+        let mut status = commands::status::parse(&out.stdout)?;
+        let git_dir = self.git_dir(repo, cancel)?;
+        (status.operation, status.rebase_step) = commands::merge::detect(&git_dir);
+        Ok(status)
+    }
+
+    fn git_dir(&self, repo: &Path, cancel: &CancelToken) -> Result<PathBuf, GitError> {
+        let args = commands::merge::git_dir_args();
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self.runner.run(Some(repo), &args, None, cancel)?;
+        Ok(PathBuf::from(out.stdout_lossy().trim_end_matches(['\r', '\n'])))
+    }
+
+    /// Merge или rebase. Остановка на конфликтах — не ошибка: операция остаётся идти,
+    /// конфликты видны в статусе.
+    pub fn merge(&self, repo: &Path, target: &str, cancel: &CancelToken) -> Result<(), GitError> {
+        self.start_operation(repo, &commands::merge::merge_args(target), cancel)
+    }
+
+    pub fn rebase(&self, repo: &Path, onto: &str, cancel: &CancelToken) -> Result<(), GitError> {
+        self.start_operation(repo, &commands::merge::rebase_args(onto), cancel)
+    }
+
+    /// `--continue`; новые конфликты на следующем шаге rebase — тоже не ошибка.
+    pub fn continue_operation(
+        &self,
+        repo: &Path,
+        op: Operation,
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        self.start_operation(repo, &commands::merge::continue_args(op), cancel)
+    }
+
+    pub fn abort_operation(&self, repo: &Path, op: Operation, cancel: &CancelToken) -> Result<(), GitError> {
+        self.run_args(repo, &commands::merge::abort_args(op), None, cancel)
+    }
+
+    /// Разрешить конфликт версией одной стороны и отметить файл решённым.
+    pub fn resolve_with(
+        &self,
+        repo: &Path,
+        path: &str,
+        ours: bool,
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        self.run_args(
+            repo,
+            &commands::merge::checkout_side_args(path, ours),
+            None,
+            cancel,
+        )?;
+        self.stage(repo, &[path.to_owned()], cancel)
+    }
+
+    fn start_operation(&self, repo: &Path, args: &[String], cancel: &CancelToken) -> Result<(), GitError> {
+        match self.run_args(repo, args, None, cancel) {
+            Err(GitError::Failed { .. }) if self.has_conflicts(repo, cancel)? => Ok(()),
+            other => other,
+        }
+    }
+
+    fn has_conflicts(&self, repo: &Path, cancel: &CancelToken) -> Result<bool, GitError> {
+        let status = self.status(repo, cancel)?;
+        Ok(status.operation.is_some() && status.conflicts().next().is_some())
     }
 
     pub fn refs(&self, repo: &Path, cancel: &CancelToken) -> Result<Vec<GitRef>, GitError> {

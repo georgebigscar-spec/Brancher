@@ -12,6 +12,8 @@ pub enum DiffTarget {
         path: String,
         staged: bool,
         untracked: bool,
+        /// Файл с конфликтом: показывается рабочая копия против HEAD, с маркерами конфликта.
+        conflicted: bool,
     },
 }
 

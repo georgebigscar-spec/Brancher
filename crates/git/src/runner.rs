@@ -182,6 +182,8 @@ impl Runner {
             .args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_OPTIONAL_LOCKS", "0")
+            // Сообщение по умолчанию вместо редактора: merge, rebase --continue, revert.
+            .env("GIT_EDITOR", "true")
             .stdin(if stdin.is_some() {
                 Stdio::piped()
             } else {
