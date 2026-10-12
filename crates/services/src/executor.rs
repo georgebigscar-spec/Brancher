@@ -3,10 +3,17 @@ use std::path::Path;
 use brancher_core::{Diff, History, Job, JobError, JobResult};
 use brancher_git::{CancelToken, Git};
 
+/// Сколько последних снимков показывать в ленте отмены.
+const OPLOG_LIMIT: usize = 200;
+
 /// Выполняет задачу и отдаёт результаты по мере готовности через `emit`.
 /// Последним всегда идёт [`JobResult::Finished`].
 pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &mut dyn FnMut(JobResult)) {
     let result: Result<(), JobError> = (|| {
+        // Снимок для ленты отмены; без него изменяющая операция не запускается.
+        if let Some(title) = job.undo_title() {
+            git.snapshot(repo, &title, cancel)?;
+        }
         match job {
             Job::Refresh { history_limit } => {
                 let status = git.status(repo, cancel).map_err(JobError::from);
@@ -100,6 +107,10 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
                 commit: commit.clone(),
                 result: git.commit_message(repo, commit, cancel).map_err(Into::into),
             }),
+            Job::Snapshots => emit(JobResult::Snapshots(
+                git.snapshots(repo, OPLOG_LIMIT, cancel).map_err(Into::into),
+            )),
+            Job::Restore { id, .. } => git.restore(repo, id, cancel)?,
             Job::Continue(op) => git.continue_operation(repo, *op, cancel)?,
             Job::Abort(op) => git.abort_operation(repo, *op, cancel)?,
             Job::ResolveConflict { path, ours } => git.resolve_with(repo, path, *ours, cancel)?,

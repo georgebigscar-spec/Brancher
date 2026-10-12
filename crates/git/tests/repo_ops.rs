@@ -799,3 +799,68 @@ fn compare_branches_commits_and_range_diff() {
     let paths: Vec<_> = files.iter().map(|f| f.path().to_owned()).collect();
     assert_eq!(paths, ["f.txt"]);
 }
+
+#[test]
+fn undo_timeline_restores_refs_head_stash_and_uncommitted() {
+    let repo = TempRepo::new("oplog");
+    let (g, c) = (git(), CancelToken::new());
+    let p = repo.path();
+    // Снимок в пустом репозитории не падает.
+    g.snapshot(p, "пусто", &c).unwrap();
+    let commit = |file: &str, text: &str, msg: &str| {
+        repo.write(file, text);
+        g.stage(p, &[file.into()], &c).unwrap();
+        g.commit(p, msg, false, &c).unwrap();
+        g.status(p, &c).unwrap().head.unwrap()
+    };
+    let first = commit("a.txt", "1\n", "first");
+    g.create_branch(p, "topic", "main", false, &c).unwrap();
+    g.create_tag(p, "v1", &first, "релиз", &c).unwrap();
+    repo.write("a.txt", "незакоммичено\n");
+    repo.write("new.txt", "staged\n");
+    g.stage(p, &["new.txt".into()], &c).unwrap();
+    g.stash_push(p, "в stash", false, &c).unwrap();
+    repo.write("a.txt", "незакоммичено\n");
+
+    // Состояние, к которому вернёмся.
+    g.snapshot(p, "Коммит «second»", &c).unwrap();
+    commit("a.txt", "2\n", "second");
+    g.delete_branch(p, "topic", true, &c).unwrap();
+    g.delete_tag(p, "v1", &c).unwrap();
+    let stash = g.stashes(p, &c).unwrap();
+    g.stash_drop(p, 0, &stash[0].id, &c).unwrap();
+    g.create_branch(p, "extra", "main", true, &c).unwrap();
+
+    let list = g.snapshots(p, 10, &c).unwrap();
+    assert_eq!(
+        list.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(),
+        ["Коммит «second»", "пусто"]
+    );
+    // Снимки не попадают в историю.
+    assert!(g
+        .log(p, 100, &c)
+        .unwrap()
+        .iter()
+        .all(|c| !c.subject.starts_with("Brancher")));
+
+    g.restore(p, &list[0].id, &c).unwrap();
+    let st = g.status(p, &c).unwrap();
+    assert_eq!(st.branch.as_deref(), Some("main"));
+    assert_eq!(st.head.as_deref(), Some(first.as_str()));
+    let refs: Vec<_> = g.refs(p, &c).unwrap().into_iter().map(|r| r.name).collect();
+    assert_eq!(refs, ["main", "topic", "v1"]);
+    assert_eq!(fs::read_to_string(p.join("a.txt")).unwrap(), "незакоммичено\n");
+    let stash = g.stashes(p, &c).unwrap();
+    assert_eq!(stash.len(), 1);
+    assert!(stash[0].message.ends_with("в stash"));
+
+    // Откат тоже попадает в ленту, и его можно отменить.
+    let list = g.snapshots(p, 10, &c).unwrap();
+    assert_eq!(list[0].title, "Перед откатом к «Коммит «second»»");
+    g.restore(p, &list[0].id, &c).unwrap();
+    let st = g.status(p, &c).unwrap();
+    assert_eq!(st.branch.as_deref(), Some("extra"));
+    let refs: Vec<_> = g.refs(p, &c).unwrap().into_iter().map(|r| r.name).collect();
+    assert_eq!(refs, ["extra", "main"]);
+    assert!(g.stashes(p, &c).unwrap().is_empty());
+}

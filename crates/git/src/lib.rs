@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use brancher_core::{
     Blame, Commit, DiffTarget, FileDiff, GitRef, Operation, Progress, RebaseAction, RebaseStep, Remote,
-    RepoStatus, Stash,
+    RepoStatus, Snapshot, Stash,
 };
 
 /// Высокоуровневые операции поверх [`Runner`].
@@ -67,6 +67,185 @@ impl Git {
 
     pub fn rebase(&self, repo: &Path, onto: &str, cancel: &CancelToken) -> Result<(), GitError> {
         self.start_operation(repo, &commands::merge::rebase_args(onto), cancel)
+    }
+
+    /// Сохраняет снимок для ленты отмены перед операцией `title`.
+    pub fn snapshot(&self, repo: &Path, title: &str, cancel: &CancelToken) -> Result<(), GitError> {
+        use commands::oplog;
+        let run = |args: &[&str], stdin: Option<&[u8]>, ok: &[i32]| {
+            self.runner.run_accepting(Some(repo), args, stdin, cancel, ok)
+        };
+        let refs = run(&strs(&oplog::refs_args()), None, &[0])?.stdout_lossy();
+        let (refs, mut keep) = oplog::parse_refs(&refs);
+        let stashes: Vec<(String, String)> = self
+            .stashes(repo, cancel)?
+            .into_iter()
+            .map(|s| (s.id, s.message))
+            .collect();
+        keep.extend(stashes.iter().map(|(id, _)| id.clone()));
+        let head = match run(&["symbolic-ref", "-q", "HEAD"], None, &[0, 1])?
+            .stdout_lossy()
+            .trim()
+        {
+            "" => {
+                let out = run(&["rev-parse", "--verify", "--quiet", "HEAD"], None, &[0, 1])?;
+                Some(out.stdout_lossy().trim().to_owned()).filter(|h| !h.is_empty())
+            }
+            sym => Some(format!("ref: {sym}")),
+        };
+        // В репозитории без коммитов `stash create` не работает — незакоммиченного там не сохранить.
+        let wip = run(&["stash", "create"], None, &[0, 1, 128])
+            .map(|o| o.stdout_lossy().trim().to_owned())
+            .ok()
+            .filter(|w| !w.is_empty());
+        if let Some(h) = head.as_deref().filter(|h| !h.starts_with("ref: ")) {
+            keep.push(h.to_owned());
+        }
+        let state = oplog::State {
+            head,
+            wip: wip.clone(),
+            refs,
+            stashes,
+        };
+        let prev = run(
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{}^{{commit}}", oplog::REF),
+            ],
+            None,
+            &[0, 1],
+        )?
+        .stdout_lossy()
+        .trim()
+        .to_owned();
+        let tree = run(&["mktree"], Some(b""), &[0])?
+            .stdout_lossy()
+            .trim()
+            .to_owned();
+        let mut parents: Vec<String> = vec![];
+        for p in std::iter::once(prev).chain(wip).chain(keep) {
+            if !p.is_empty() && !parents.contains(&p) {
+                parents.push(p);
+            }
+        }
+        let mut args = vec!["commit-tree".to_owned(), "--no-gpg-sign".to_owned(), tree];
+        for p in parents {
+            args.extend(["-p".to_owned(), p]);
+        }
+        args.extend(["-F".to_owned(), "-".to_owned()]);
+        let mut git = self.clone();
+        for (k, v) in [
+            ("GIT_AUTHOR_NAME", "Brancher"),
+            ("GIT_AUTHOR_EMAIL", "brancher@localhost"),
+            ("GIT_COMMITTER_NAME", "Brancher"),
+            ("GIT_COMMITTER_EMAIL", "brancher@localhost"),
+        ] {
+            git.runner.env.push((k.into(), v.into()));
+        }
+        let message = oplog::message(title, &state);
+        let out = git
+            .runner
+            .run(Some(repo), &strs(&args), Some(message.as_bytes()), cancel)?;
+        let id = out.stdout_lossy().trim().to_owned();
+        run(
+            &["update-ref", "-m", "brancher snapshot", oplog::REF, &id],
+            None,
+            &[0],
+        )
+        .map(|_| ())
+    }
+
+    /// Снимки ленты отмены, новые сверху.
+    pub fn snapshots(
+        &self,
+        repo: &Path,
+        limit: usize,
+        cancel: &CancelToken,
+    ) -> Result<Vec<Snapshot>, GitError> {
+        use commands::oplog;
+        let exists = self.runner.run_accepting(
+            Some(repo),
+            &["rev-parse", "--verify", "--quiet", oplog::REF],
+            None,
+            cancel,
+            &[0, 1],
+        )?;
+        if exists.stdout_lossy().trim().is_empty() {
+            return Ok(vec![]);
+        }
+        let out = self
+            .runner
+            .run(Some(repo), &strs(&oplog::list_args(limit)), None, cancel)?;
+        oplog::parse_list(&out.stdout)
+    }
+
+    /// Возвращает репозиторий к снимку `id`. Текущее состояние перед этим само попадает
+    /// в ленту, так что откат тоже можно отменить.
+    pub fn restore(&self, repo: &Path, id: &str, cancel: &CancelToken) -> Result<(), GitError> {
+        use commands::oplog;
+        if let Some(op) = self.status(repo, cancel)?.operation {
+            return Err(GitError::Stale(format!(
+                "Идёт {}: сначала завершите или прервите его",
+                op.name()
+            )));
+        }
+        let run = |args: &[&str], stdin: Option<&[u8]>| self.runner.run(Some(repo), args, stdin, cancel);
+        let msg = run(&["log", "-1", "--format=%B", id, "--"], None)?.stdout_lossy();
+        let state =
+            oplog::parse_message(&msg).ok_or_else(|| GitError::Parse(format!("{id} не снимок Brancher")))?;
+        let title = msg
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches("Brancher: ");
+        self.snapshot(repo, &format!("Перед откатом к «{title}»"), cancel)?;
+
+        // Ветки и теги: как в снимке, лишние — удалить.
+        let (current, _) = oplog::parse_refs(&run(&strs(&oplog::refs_args()), None)?.stdout_lossy());
+        let mut script = String::new();
+        for (sha, name) in &state.refs {
+            script.push_str(&format!("update {name} {sha}\n"));
+        }
+        for (_, name) in current
+            .iter()
+            .filter(|(_, n)| !state.refs.iter().any(|(_, s)| s == n))
+        {
+            script.push_str(&format!("delete {name}\n"));
+        }
+        run(&["update-ref", "--stdin"], Some(script.as_bytes()))?;
+
+        if let Some(h) = state.head.as_deref() {
+            match h.strip_prefix("ref: ") {
+                Some(r) => run(&["symbolic-ref", "HEAD", r], None)?,
+                None => run(&["update-ref", "--no-deref", "HEAD", h], None)?,
+            };
+        }
+        let has_head = run(&["rev-parse", "--verify", "--quiet", "HEAD"], None).is_ok();
+        if has_head {
+            run(&["reset", "--hard", "-q"], None)?;
+        }
+
+        // Stash: записи, которых не было в снимке, убираются (их содержимое есть в снимке
+        // «Перед откатом…»), недостающие возвращаются.
+        let now = self.stashes(repo, cancel)?;
+        for st in now
+            .iter()
+            .rev()
+            .filter(|st| !state.stashes.iter().any(|(id, _)| *id == st.id))
+        {
+            run(&strs(&commands::stash::drop_args(st.index)), None)?;
+        }
+        let now: Vec<String> = self.stashes(repo, cancel)?.into_iter().map(|s| s.id).collect();
+        for (sha, m) in state.stashes.iter().rev().filter(|(id, _)| !now.contains(id)) {
+            run(&["stash", "store", "-m", m, sha], None)?;
+        }
+
+        if let Some(wip) = &state.wip {
+            run(&["stash", "apply", "--index", wip], None)?;
+        }
+        Ok(())
     }
 
     /// Interactive rebase по готовому плану; `base` — `None` для rebase с корня истории.
@@ -557,4 +736,8 @@ impl Git {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         self.runner.run(Some(repo), &args, stdin, cancel).map(|_| ())
     }
+}
+
+fn strs(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).collect()
 }

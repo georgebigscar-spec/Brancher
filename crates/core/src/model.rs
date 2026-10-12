@@ -101,6 +101,15 @@ impl ChangeKind {
     }
 }
 
+/// Снимок ленты отмены: состояние репозитория перед операцией `title`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Snapshot {
+    pub id: Oid,
+    /// Unix-время в секундах.
+    pub time: i64,
+    pub title: String,
+}
+
 /// Remote репозитория из `git remote -v`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Remote {
