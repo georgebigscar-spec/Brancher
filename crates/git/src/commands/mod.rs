@@ -8,6 +8,7 @@ pub mod commit;
 pub mod diff;
 pub mod log;
 pub mod merge;
+pub mod oplog;
 pub mod progress;
 pub mod rebase;
 pub mod refs;

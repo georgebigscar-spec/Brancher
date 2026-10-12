@@ -128,6 +128,13 @@ pub enum Job {
     },
     /// Полное сообщение коммита (для reword).
     CommitMessage(Oid),
+    /// Список снимков ленты отмены.
+    Snapshots,
+    /// Вернуть репозиторий к снимку.
+    Restore {
+        id: Oid,
+        title: String,
+    },
     Continue(Operation),
     Abort(Operation),
     /// Разрешить конфликт версией одной из сторон и отметить файл решённым.
@@ -153,6 +160,7 @@ impl Job {
                 | Job::FileLog(_)
                 | Job::CommitMessage(_)
                 | Job::Compare { .. }
+                | Job::Snapshots
         )
     }
 
@@ -190,6 +198,8 @@ impl Job {
             Job::Rebase(_) => "rebase",
             Job::InteractiveRebase { .. } => "rebase -i",
             Job::CommitMessage(_) => "message",
+            Job::Snapshots => "oplog",
+            Job::Restore { .. } => "restore",
             Job::Continue(op) => match op {
                 Operation::Merge => "merge --continue",
                 Operation::Rebase => "rebase --continue",
@@ -204,6 +214,48 @@ impl Job {
             },
             Job::ResolveConflict { .. } => "resolve",
         }
+    }
+
+    /// Название снимка ленты отмены, который делается перед задачей; `None` — без снимка
+    /// (только индекс, сеть, настройки remotes, чтение).
+    pub fn undo_title(&self) -> Option<String> {
+        let short = |id: &str| id.chars().take(10).collect::<String>();
+        Some(match self {
+            Job::Commit { message, amend } => {
+                let subject: String = message
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(60)
+                    .collect();
+                if *amend {
+                    format!("Amend «{subject}»")
+                } else {
+                    format!("Коммит «{subject}»")
+                }
+            }
+            Job::ApplyPatch { cached: false, .. } => "Отмена строк в рабочей копии".into(),
+            Job::Switch(b) | Job::SwitchTrack(b) => format!("Переключение на {b}"),
+            Job::CreateBranch { name, .. } => format!("Ветка {name}"),
+            Job::DeleteBranch(b) => format!("Удаление ветки {b}"),
+            Job::Pull => "Pull".into(),
+            Job::StashPush { .. } => "Stash".into(),
+            Job::StashApply { pop: true, .. } => "Stash pop".into(),
+            Job::StashApply { pop: false, .. } => "Stash apply".into(),
+            Job::StashDrop { index, .. } => format!("Удаление stash@{{{index}}}"),
+            Job::CreateTag { name, .. } => format!("Тег {name}"),
+            Job::DeleteTag(name) => format!("Удаление тега {name}"),
+            Job::CherryPick { commit, .. } => format!("Cherry-pick {}", short(commit)),
+            Job::Revert { commit, .. } => format!("Revert {}", short(commit)),
+            Job::Merge(b) => format!("Merge {b}"),
+            Job::Rebase(b) => format!("Rebase на {b}"),
+            Job::InteractiveRebase { .. } => "Interactive rebase".into(),
+            Job::Continue(op) => format!("Продолжение {}", op.name()),
+            Job::Abort(op) => format!("Прерывание {}", op.name()),
+            Job::ResolveConflict { path, .. } => format!("Разрешение конфликта {path}"),
+            _ => return None,
+        })
     }
 
     /// Сетевая задача: показывает прогресс и её можно отменить.
@@ -259,6 +311,7 @@ pub enum JobResult {
         other: String,
         result: Result<(Vec<Commit>, Vec<Commit>), JobError>,
     },
+    Snapshots(Result<Vec<Snapshot>, JobError>),
     /// Файлы репозитория изменились снаружи (редактор, терминал) — нужно обновиться.
     FilesChanged,
     /// Этап сетевой задачи репозитория (fetch, pull, push).
@@ -423,6 +476,11 @@ pub enum Action {
     },
     CancelRebasePlan,
     RunRebasePlan,
+    /// Открыть ленту отмены.
+    ShowOplog,
+    CloseOplog,
+    /// Вернуться к состоянию перед операцией из ленты (спрашивает подтверждение).
+    RestoreSnapshot(Oid),
     /// Продолжить merge или rebase после разрешения конфликтов.
     ContinueOperation,
     /// Прервать merge или rebase (спрашивает подтверждение).
@@ -643,6 +701,8 @@ pub struct RepoState {
     pub head_only: bool,
     /// Номера коммитов `history`, прошедших фильтр; `None` — фильтра нет, видна вся история.
     pub history_filter: Option<Vec<usize>>,
+    /// Открытая лента отмены; внутренний `None` — список ещё загружается.
+    pub oplog: Option<Option<Vec<Snapshot>>>,
     /// Открытый диалог interactive rebase.
     pub rebase_plan: Option<RebasePlan>,
     /// Blame или история файла; пока открыт, diff закрыт.
@@ -1419,8 +1479,8 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     if let Some(b) = branch.filter(|b| !b.is_head) {
                         repo.confirm = Some(Confirm {
                             title: format!("Удалить ветку {name}?"),
-                            description: "Если её коммитов нет в других ветках, найти их потом \
-                                          можно будет только через reflog."
+                            description: "Если её коммитов нет в других ветках, вернуть ветку можно \
+                                          через «История» → «Отменить»."
                                 .into(),
                             action: "Удалить".into(),
                             job: Job::DeleteBranch(b.name.clone()),
@@ -1466,7 +1526,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                         repo.confirm = Some(Confirm {
                             title: format!("Удалить stash@{{{index}}}?"),
                             description: format!(
-                                "«{}». Спрятанные изменения пропадут, найти их потом будет трудно.",
+                                "«{}». Вернуть запись можно через «История» → «Отменить».",
                                 st.message
                             ),
                             action: "Удалить".into(),
@@ -1669,6 +1729,32 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 Action::SetRebaseMessage { index, message } => {
                     if let Some(step) = repo.rebase_plan.as_mut().and_then(|p| p.steps.get_mut(index)) {
                         step.message = Some(message);
+                    }
+                    vec![]
+                }
+                Action::ShowOplog => {
+                    repo.oplog = Some(None);
+                    spawn(Job::Snapshots)
+                }
+                Action::CloseOplog => {
+                    repo.oplog = None;
+                    vec![]
+                }
+                Action::RestoreSnapshot(id) => {
+                    let snapshot = repo.oplog.iter().flatten().flatten().find(|s| s.id == id);
+                    if let Some(s) = snapshot {
+                        repo.confirm = Some(Confirm {
+                            title: format!("Вернуться к состоянию перед «{}»?", s.title),
+                            description: "Ветки, теги, stash, HEAD и незакоммиченные изменения станут такими, \
+                                          какими были перед этой операцией. Неотслеживаемые файлы не трогаются. \
+                                          Текущее состояние сохранится в ленте, откат можно будет отменить."
+                                .into(),
+                            action: "Вернуть".into(),
+                            job: Job::Restore {
+                                id: s.id.clone(),
+                                title: s.title.clone(),
+                            },
+                        });
                     }
                     vec![]
                 }
@@ -1940,6 +2026,17 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
                 }
             }
         }
+        JobResult::Snapshots(result) => match result {
+            Ok(list) => {
+                if r.oplog.is_some() {
+                    r.oplog = Some(Some(list));
+                }
+            }
+            Err(e) => {
+                r.oplog = None;
+                error = Some(("Не удалось прочитать ленту отмены".to_owned(), e));
+            }
+        },
         JobResult::CommitMessage { commit, result } => match result {
             Ok(m) => {
                 let steps = r.rebase_plan.iter_mut().flat_map(|p| p.steps.iter_mut());
@@ -1983,11 +2080,18 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
                     }
                     if job == "refresh" {
                         effects.extend(refresh_change_diff(r));
-                    } else if !matches!(job, "diff" | "blame" | "log" | "message") {
+                    } else if !matches!(job, "diff" | "blame" | "log" | "message" | "oplog") {
                         effects.push(Effect::Spawn {
                             repo,
                             job: Job::Refresh { history_limit: limit },
                         });
+                        // Открытая лента показывает и снимок только что сделанной операции.
+                        if r.oplog.is_some() {
+                            effects.push(Effect::Spawn {
+                                repo,
+                                job: Job::Snapshots,
+                            });
+                        }
                     }
                 }
                 Err(e) => error = Some((format!("Ошибка: git {job}"), e)),
@@ -3519,5 +3623,64 @@ mod tests {
         let r = s.active_repo().unwrap();
         assert_eq!(r.diff_target, Some(range));
         assert!(r.file_view.is_none());
+    }
+
+    #[test]
+    fn undo_timeline() {
+        let commit = Job::Commit {
+            message: "Тема\n\nтело".into(),
+            amend: false,
+        };
+        assert_eq!(commit.undo_title().as_deref(), Some("Коммит «Тема»"));
+        assert_eq!(Job::Stage(vec![]).undo_title(), None);
+        assert_eq!(Job::Fetch.undo_title(), None);
+        assert!(Job::DeleteBranch("x".into()).undo_title().is_some());
+
+        let mut s = AppState::new();
+        let id = open(&mut s, "/a");
+        assert_eq!(
+            reduce(&mut s, Action::ShowOplog),
+            [Effect::Spawn {
+                repo: id,
+                job: Job::Snapshots
+            }]
+        );
+        let snap = Snapshot {
+            id: "s1".into(),
+            time: 0,
+            title: "Коммит «x»".into(),
+        };
+        apply_result(&mut s, id, JobResult::Snapshots(Ok(vec![snap])));
+        assert!(reduce(&mut s, Action::RestoreSnapshot("nope".into())).is_empty());
+        assert!(s.active_repo().unwrap().confirm.is_none());
+        reduce(&mut s, Action::RestoreSnapshot("s1".into()));
+        assert_eq!(
+            reduce(&mut s, Action::Confirm(true)),
+            [Effect::Spawn {
+                repo: id,
+                job: Job::Restore {
+                    id: "s1".into(),
+                    title: "Коммит «x»".into()
+                }
+            }]
+        );
+        // После изменяющей задачи открытая лента перечитывается, после чтения — нет.
+        let finished =
+            |s: &mut AppState, job| apply_result(s, id, JobResult::Finished { job, result: Ok(()) });
+        let reloads = |fx: &[Effect]| {
+            fx.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::Spawn {
+                        job: Job::Snapshots,
+                        ..
+                    }
+                )
+            })
+        };
+        assert!(reloads(&finished(&mut s, "restore")));
+        assert!(!reloads(&finished(&mut s, "oplog")));
+        reduce(&mut s, Action::CloseOplog);
+        assert!(!reloads(&finished(&mut s, "commit")));
     }
 }

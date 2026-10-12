@@ -10,8 +10,9 @@ const FORMAT: &str = "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%cn%x00%ce%x00%c
 pub fn args(limit: usize) -> Vec<String> {
     vec![
         "log".into(),
-        // Коммиты stash показываются отдельным списком, а не в графе.
+        // Коммиты stash показываются отдельным списком, а снимки ленты отмены — служебные.
         "--exclude=refs/stash".into(),
+        "--exclude=refs/brancher/*".into(),
         "--all".into(),
         "--date-order".into(),
         "--no-color".into(),

@@ -27,6 +27,7 @@ pub fn show(ui: &mut Ui, repo: &RepoState, settings: &Settings, actions: &mut Ve
     crate::tags::new_tag_dialog(ui.ctx(), actions);
     crate::stash::dialog(ui.ctx(), actions);
     crate::remotes::dialog(ui.ctx(), repo, actions);
+    crate::oplog::dialog(ui.ctx(), repo, actions);
     if let Some(plan) = &repo.rebase_plan {
         crate::rebase_plan::dialog(ui.ctx(), plan, actions);
     }
@@ -88,6 +89,13 @@ fn toolbar(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
                 .clicked()
             {
                 actions.push(Action::Refresh);
+            }
+            if ui
+                .add(widgets::Button::outline("История"))
+                .on_hover_text("История операций: отменить commit, rebase, удаление ветки…")
+                .clicked()
+            {
+                actions.push(Action::ShowOplog);
             }
             remote_buttons(ui, repo, actions);
         });
