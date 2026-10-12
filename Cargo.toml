@@ -18,6 +18,8 @@ egui_extras = "0.36"
 egui_kittest = "0.36"
 # Подсветка синтаксиса в diff; чистый Rust (fancy-regex), без oniguruma.
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "parsing", "regex-fancy"] }
+# Наблюдение за файлами репозитория (REPO-06): inotify / FSEvents / ReadDirectoryChangesW.
+notify = "8"
 
 brancher-core = { path = "crates/core" }
 brancher-git = { path = "crates/git" }
