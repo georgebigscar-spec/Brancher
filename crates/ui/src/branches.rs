@@ -56,7 +56,7 @@ pub fn refs(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
                     if merged > 0
                         && ui
                             .small_button(format!("Удалить слитые ({merged})"))
-                            .on_hover_text("Удалить локальные ветки, все коммиты которых уже есть в основной")
+                            .on_hover_text("Удалить локальные ветки, изменения которых уже есть в основной")
                             .clicked()
                     {
                         actions.push(Action::DeleteMerged);
@@ -103,7 +103,7 @@ fn ref_row(ui: &mut Ui, r: &GitRef, current: Option<&str>, actions: &mut Vec<Act
         RefKind::LocalBranch if r.is_head => response.on_hover_text("Текущая ветка"),
         RefKind::Tag => response,
         _ if r.merged => response.on_hover_text(
-            "Все коммиты ветки уже есть в основной — её можно удалить. Двойной клик — переключиться",
+            "Изменения ветки уже есть в основной — её можно удалить. Двойной клик — переключиться",
         ),
         _ => response.on_hover_text("Двойной клик — переключиться"),
     };

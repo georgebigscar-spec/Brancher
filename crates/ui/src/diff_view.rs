@@ -514,7 +514,8 @@ fn file_row(painter: &egui::Painter, rect: Rect, file: &FileDiff, theme: &Theme)
     painter.rect_filled(rect, 0.0, theme.muted);
     let y = rect.center().y;
     let path = match (&file.old_path, &file.new_path) {
-        (Some(a), Some(b)) if a != b => format!("{a} → {b}"),
+        // Стрелки «→» нет во встроенных шрифтах.
+        (Some(a), Some(b)) if a != b => format!("{b}  (было {a})"),
         _ => file.path().to_owned(),
     };
     let bold = FontId::proportional(14.0);
