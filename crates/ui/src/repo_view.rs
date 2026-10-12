@@ -150,7 +150,17 @@ fn history(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
         widgets::muted(ui, "Коммитов пока нет.");
         return;
     }
-    let graph_width = crate::graph::column_width(&repo.graph);
+    search_bar(ui, repo, actions);
+    // С фильтром соседние строки — не соседи в графе, поэтому граф не рисуется.
+    let graph_width = match repo.history_filter {
+        Some(_) => 0.0,
+        None => crate::graph::column_width(&repo.graph),
+    };
+    let count = repo.history_filter.as_ref().map_or(repo.history.len(), Vec::len);
+    if count == 0 {
+        widgets::muted(ui, "Ничего не найдено.");
+        return;
+    }
     let theme = widgets::Theme::get(ui.ctx());
     // Строки рисуются вручную ровно по ROW_HEIGHT: так show_rows знает точную высоту,
     // а линии графа соседних строк смыкаются без зазоров.
@@ -158,8 +168,9 @@ fn history(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
     egui::ScrollArea::vertical()
         .id_salt("history")
         .auto_shrink([false, false])
-        .show_rows(ui, ROW_HEIGHT, repo.history.len(), |ui, range| {
-            for i in range {
+        .show_rows(ui, ROW_HEIGHT, count, |ui, range| {
+            for row in range {
+                let i = repo.history_filter.as_ref().map_or(row, |f| f[row]);
                 let c = &repo.history[i];
                 let selected = repo.selected_commit.as_deref() == Some(c.id.as_str());
                 let size = egui::vec2(ui.available_width(), ROW_HEIGHT);
@@ -175,13 +186,57 @@ fn history(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
                 if selected || response.hovered() {
                     painter.rect_filled(rect, 0.0, theme.accent);
                 }
-                if let Some(row) = repo.graph.rows.get(i) {
+                if let (Some(row), None) = (repo.graph.rows.get(i), &repo.history_filter) {
                     let graph = egui::Rect::from_min_size(rect.min, egui::vec2(graph_width, ROW_HEIGHT));
                     crate::graph::paint_row(ui, graph, row, c.is_merge());
                 }
                 history_text(&painter, rect, graph_width, c, &theme);
             }
         });
+}
+
+/// Поиск по истории (Ctrl+F) и фильтр «только текущая ветка».
+fn search_bar(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
+    let focus = ui.input_mut(|i| {
+        i.consume_shortcut(&egui::KeyboardShortcut::new(
+            egui::Modifiers::COMMAND,
+            egui::Key::F,
+        ))
+    });
+    ui.horizontal(|ui| {
+        let mut head_only = repo.head_only;
+        let mut query = repo.history_query.clone();
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(widgets::Checkbox::new(&mut head_only).label("Только текущая ветка"))
+                .changed()
+            {
+                actions.push(Action::SetHeadOnly(head_only));
+            }
+            // Подпись есть всегда (иногда пустая): иначе у поля сменится авто-id и уйдёт фокус.
+            let found = match &repo.history_filter {
+                Some(f) => format!("{} из {}", f.len(), repo.history.len()),
+                None => String::new(),
+            };
+            widgets::muted(ui, found);
+            let input = ui.add(
+                widgets::Input::new(&mut query)
+                    .placeholder("Поиск: текст, автор или SHA (Ctrl+F)")
+                    .width(ui.available_width()),
+            );
+            if focus {
+                input.request_focus();
+            }
+            if input.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                query.clear();
+                input.surrender_focus();
+            }
+            if query != repo.history_query {
+                actions.push(Action::SetHistoryQuery(query));
+            }
+        });
+    });
+    ui.add_space(4.0);
 }
 
 /// Короткий SHA, заголовок и автор в одной строке истории.
