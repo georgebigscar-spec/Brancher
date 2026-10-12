@@ -115,6 +115,7 @@ pub fn parse(out: &[u8]) -> Result<Vec<FileDiff>, GitError> {
                 new_no: n,
                 text: utf8(text),
                 cr: cr && kind != LineKind::NoNewline,
+                spans: vec![],
             });
             continue;
         }

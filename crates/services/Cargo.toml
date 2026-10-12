@@ -12,3 +12,4 @@ name = "brancher_services"
 [dependencies]
 brancher-core.workspace = true
 brancher-git.workspace = true
+syntect.workspace = true

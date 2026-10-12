@@ -33,6 +33,18 @@ pub struct DiffLine {
     pub text: String,
     /// Строка заканчивалась на `\r\n` (нужно, чтобы собрать patch байт в байт).
     pub cr: bool,
+    /// Подсветка синтаксиса; пусто — без подсветки. Заполняется в фоне после разбора.
+    pub spans: Vec<Span>,
+}
+
+/// Участок строки одного цвета: байты `start..end` в [`DiffLine::text`].
+/// Цвета для светлой и тёмной темы считаются сразу, чтобы смена темы не пересчитывала diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    pub start: u32,
+    pub end: u32,
+    pub light: [u8; 3],
+    pub dark: [u8; 3],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +223,7 @@ mod tests {
             new_no: None,
             text: String::new(),
             cr: false,
+            spans: vec![],
         }
     }
 

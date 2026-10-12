@@ -3,6 +3,11 @@ allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", 
 
 [advisories]
 yanked = "deny"
+ignore = [
+    # bincode 1 больше не сопровождается, но уязвимостей нет; syntect читает им
+    # встроенные дампы синтаксисов и тем, которые мы не подменяем.
+    { id = "RUSTSEC-2025-0141", reason = "unmaintained, через syntect; только встроенные данные" },
+]
 
 [bans]
 multiple-versions = "warn"

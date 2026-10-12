@@ -227,6 +227,7 @@ mod tests {
             new_no: None,
             text: text.into(),
             cr: false,
+            spans: vec![],
         }
     }
 

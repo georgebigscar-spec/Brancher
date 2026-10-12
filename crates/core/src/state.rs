@@ -1004,6 +1004,7 @@ mod tests {
             new_no: None,
             text: text.into(),
             cr: false,
+            spans: vec![],
         };
         let file = FileDiff {
             old_path: Some("f.txt".into()),
