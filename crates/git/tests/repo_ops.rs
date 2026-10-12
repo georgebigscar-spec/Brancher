@@ -346,3 +346,52 @@ fn create_switch_track_and_delete_branches() {
     let names: Vec<_> = g.refs(p, &c).unwrap().into_iter().map(|r| r.name).collect();
     assert!(!names.contains(&"topic/x".to_owned()), "{names:?}");
 }
+
+#[test]
+fn fetch_pull_and_push_with_local_remote() {
+    let (g, c) = (git(), CancelToken::new());
+    let origin = TempRepo::new("origin-src");
+    origin.write("a.txt", "1\n");
+    g.stage(origin.path(), &["a.txt".into()], &c).unwrap();
+    g.commit(origin.path(), "one", false, &c).unwrap();
+    let bare = std::env::temp_dir().join(format!("brancher-test-bare-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&bare);
+    let url = bare.display().to_string();
+    let run = |dir: &Path, args: &[&str]| {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap()
+            .success());
+    };
+    run(origin.path(), &["clone", "-q", "--bare", ".", &url]);
+
+    // Клон, коммит и первый push новой ветки с -u.
+    let work = TempRepo::new("work");
+    let w = work.path();
+    run(w, &["remote", "add", "origin", &url]);
+    g.fetch(w, &c, &mut |_| {}).unwrap();
+    run(w, &["checkout", "-q", "-B", "main", "origin/main"]);
+    work.write("b.txt", "2\n");
+    g.stage(w, &["b.txt".into()], &c).unwrap();
+    g.commit(w, "two", false, &c).unwrap();
+    g.push(w, None, &c, &mut |_| {}).unwrap();
+    g.create_branch(w, "topic", "main", true, &c).unwrap();
+    g.push(w, Some(("origin", "topic")), &c, &mut |_| {}).unwrap();
+    let topic = g
+        .refs(w, &c)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.name == "topic")
+        .unwrap();
+    assert_eq!(topic.upstream.as_deref(), Some("refs/remotes/origin/topic"));
+
+    // Второй клон забирает изменения перемоткой.
+    run(origin.path(), &["remote", "add", "up", &url]);
+    g.fetch(origin.path(), &c, &mut |_| {}).unwrap();
+    run(origin.path(), &["branch", "-q", "--set-upstream-to=up/main"]);
+    g.pull(origin.path(), &c, &mut |_| {}).unwrap();
+    assert!(origin.path().join("b.txt").exists());
+    let _ = fs::remove_dir_all(&bare);
+}

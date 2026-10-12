@@ -103,7 +103,7 @@ fn clone_progress(ui: &mut Ui, c: &Cloning, actions: &mut Vec<Action>) {
     widgets::label(ui, &c.url);
     widgets::muted(ui, format!("в папку {}", c.dest.display()));
     let p = &c.progress;
-    let phase = match (phase_name(&p.phase), p.percent) {
+    let phase = match (crate::phase_name(&p.phase), p.percent) {
         (phase, Some(n)) => format!("{phase}: {n}%"),
         (phase, None) => format!("{phase}…"),
     };
@@ -118,19 +118,6 @@ fn clone_progress(ui: &mut Ui, c: &Cloning, actions: &mut Vec<Action>) {
             actions.push(Action::CancelClone);
         }
     });
-}
-
-/// Этапы `git clone` по-русски; незнакомые (другая локаль git, сообщения сервера) — как есть.
-fn phase_name(phase: &str) -> &str {
-    match phase {
-        "" => "Подключение",
-        p if p.starts_with("Cloning into") => "Подключение",
-        "Enumerating objects" | "Counting objects" | "Compressing objects" => "Подготовка на сервере",
-        "Receiving objects" => "Загрузка объектов",
-        "Resolving deltas" => "Разбор изменений",
-        "Updating files" | "Checking out files" => "Распаковка файлов",
-        p => p,
-    }
 }
 
 /// Домашняя папка из окружения (без обращения к диску: UI не читает ФС).

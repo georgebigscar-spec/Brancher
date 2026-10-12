@@ -49,6 +49,13 @@ pub enum Job {
     },
     /// Удалить локальную ветку, даже не слитую (после подтверждения).
     DeleteBranch(String),
+    Fetch,
+    /// Pull текущей ветки, только перемотка вперёд.
+    Pull,
+    /// Push текущей ветки; `set_upstream` — `(remote, ветка)`, если upstream ещё нет.
+    Push {
+        set_upstream: Option<(String, String)>,
+    },
 }
 
 impl Job {
@@ -70,7 +77,15 @@ impl Job {
             Job::Switch(_) | Job::SwitchTrack(_) => "switch",
             Job::CreateBranch { .. } => "branch",
             Job::DeleteBranch(_) => "delete-branch",
+            Job::Fetch => "fetch",
+            Job::Pull => "pull",
+            Job::Push { .. } => "push",
         }
+    }
+
+    /// Сетевая задача: показывает прогресс и её можно отменить.
+    pub fn is_network(&self) -> bool {
+        matches!(self, Job::Fetch | Job::Pull | Job::Push { .. })
     }
 }
 
@@ -99,10 +114,17 @@ pub enum JobResult {
     },
     /// Файлы репозитория изменились снаружи (редактор, терминал) — нужно обновиться.
     FilesChanged,
+    /// Этап сетевой задачи репозитория (fetch, pull, push).
+    Progress(Progress),
+    /// git или ssh спрашивает логин, пароль или passphrase (адресуется [`RepoId::APP`]).
+    Prompt {
+        id: u64,
+        text: String,
+    },
     /// Этап клонирования `id` (адресуется [`RepoId::APP`]).
     CloneProgress {
         id: u64,
-        progress: CloneProgress,
+        progress: Progress,
     },
     /// Клонирование `id` закончено: путь нового репозитория или ошибка.
     Cloned {
@@ -179,6 +201,13 @@ pub enum Action {
     },
     /// Удалить локальную ветку (спрашивает подтверждение).
     DeleteBranch(String),
+    Fetch,
+    Pull,
+    Push,
+    /// Отменить идущую сетевую задачу активной вкладки.
+    CancelJob,
+    /// Ответ на запрос git (первый в очереди); `None` — отмена.
+    AnswerPrompt(Option<String>),
     /// Восстановить вкладки и настройки прошлого запуска.
     Restore(Session),
     /// Клонировать `url` в папку `dest` (её создаст git) и открыть результат.
@@ -208,11 +237,35 @@ pub enum Effect {
         dest: PathBuf,
     },
     CancelClone,
+    CancelJob(RepoId),
+    AnswerPrompt {
+        id: u64,
+        answer: Option<String>,
+    },
 }
 
-/// Строка прогресса `git clone --progress`: этап и процент, если git его сообщил.
+/// Вопрос git или ssh к пользователю.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prompt {
+    pub id: u64,
+    pub text: String,
+    /// Пароль, токен или passphrase: поле ввода скрывает символы.
+    pub secret: bool,
+}
+
+impl Prompt {
+    pub fn new(id: u64, text: String) -> Self {
+        let lower = text.to_lowercase();
+        let secret = ["password", "passphrase", "token", "пароль"]
+            .iter()
+            .any(|w| lower.contains(w));
+        Self { id, text, secret }
+    }
+}
+
+/// Строка прогресса `git … --progress` (clone, fetch, push): этап и процент, если git его сообщил.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct CloneProgress {
+pub struct Progress {
     pub phase: String,
     pub percent: Option<u8>,
 }
@@ -224,7 +277,7 @@ pub struct Cloning {
     pub id: u64,
     pub url: String,
     pub dest: PathBuf,
-    pub progress: CloneProgress,
+    pub progress: Progress,
 }
 
 /// Имя папки для клона, как его выбирает git: последний сегмент URL без `.git`.
@@ -287,6 +340,8 @@ pub struct RepoState {
     pub busy: u32,
     /// Файлы менялись, пока шли задачи: обновиться, когда очередь опустеет.
     pub stale: bool,
+    /// Прогресс fetch, pull или push; `Some`, пока такая задача в очереди или идёт.
+    pub progress: Option<Progress>,
     /// Растёт при каждом изменении данных — ключ кешей UI (раздел 3).
     pub version: u64,
 }
@@ -432,6 +487,8 @@ pub struct AppState {
     pub settings: Settings,
     /// Идущее клонирование (одно за раз).
     pub cloning: Option<Cloning>,
+    /// Вопросы git к пользователю; показывается первый.
+    pub prompts: std::collections::VecDeque<Prompt>,
     next_id: u64,
 }
 
@@ -472,6 +529,35 @@ pub fn branch_name_error(name: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Задача push для текущей ветки: без upstream — `-u` на `origin` (или единственный remote).
+fn push_job(repo: &RepoState) -> Result<Job, &'static str> {
+    let head = repo
+        .refs
+        .iter()
+        .find(|r| r.kind == RefKind::LocalBranch && r.is_head)
+        .ok_or("Нет текущей ветки (detached HEAD или репозиторий без коммитов).")?;
+    if head.upstream.is_some() {
+        return Ok(Job::Push { set_upstream: None });
+    }
+    let mut remotes: Vec<&str> = repo
+        .refs
+        .iter()
+        .filter(|r| r.kind == RefKind::RemoteBranch)
+        .filter_map(|r| r.name.split_once('/').map(|(remote, _)| remote))
+        .collect();
+    remotes.dedup();
+    let remote = if remotes.contains(&"origin") {
+        "origin"
+    } else {
+        *remotes
+            .first()
+            .ok_or("У репозитория нет remote-веток: добавьте remote и сделайте fetch.")?
+    };
+    Ok(Job::Push {
+        set_upstream: Some((remote.to_owned(), head.name.clone())),
+    })
 }
 
 /// Сколько недавних репозиториев помнить.
@@ -572,10 +658,14 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 id,
                 url: url.clone(),
                 dest: dest.clone(),
-                progress: CloneProgress::default(),
+                progress: Progress::default(),
             });
             vec![Effect::Clone { id, url, dest }]
         }
+        Action::AnswerPrompt(answer) => match state.prompts.pop_front() {
+            Some(p) => vec![Effect::AnswerPrompt { id: p.id, answer }],
+            None => vec![],
+        },
         Action::CancelClone => match state.cloning.take() {
             Some(_) => vec![Effect::CancelClone],
             None => vec![],
@@ -731,6 +821,30 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                         }
                     }
                 }
+                Action::Fetch | Action::Pull | Action::Push if repo.progress.is_some() => vec![],
+                Action::Fetch => {
+                    repo.progress = Some(Progress::default());
+                    spawn(Job::Fetch)
+                }
+                Action::Pull => {
+                    repo.progress = Some(Progress::default());
+                    spawn(Job::Pull)
+                }
+                Action::Push => match push_job(repo) {
+                    Ok(job) => {
+                        repo.progress = Some(Progress::default());
+                        spawn(job)
+                    }
+                    Err(details) => {
+                        state.notifications.push(Notification {
+                            severity: Severity::Info,
+                            title: "Push невозможен".into(),
+                            details: details.into(),
+                        });
+                        vec![]
+                    }
+                },
+                Action::CancelJob if repo.progress.is_some() => vec![Effect::CancelJob(id)],
                 Action::SwitchBranch(name) => spawn(Job::Switch(name)),
                 Action::CheckoutRemote(remote) => {
                     // `origin/feature` → `feature`; если такая локальная ветка уже есть — на неё.
@@ -877,6 +991,10 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
             }
             return vec![];
         }
+        JobResult::Prompt { id, text } => {
+            state.prompts.push_back(Prompt::new(id, text));
+            return vec![];
+        }
         // Другой `id` или нет `cloning` — клонирование отменили, результат не нужен.
         JobResult::Cloned { id, result } => {
             if !state.cloning.as_ref().is_some_and(|c| c.id == id) {
@@ -926,9 +1044,10 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
         JobResult::Status(Err(e)) | JobResult::Refs(Err(e)) | JobResult::History(Err(e)) => {
             error = Some(("Не удалось прочитать репозиторий".to_owned(), e))
         }
-        JobResult::CloneProgress { .. } | JobResult::Cloned { .. } => {
+        JobResult::CloneProgress { .. } | JobResult::Cloned { .. } | JobResult::Prompt { .. } => {
             unreachable!("обработано выше")
         }
+        JobResult::Progress(p) => r.progress = Some(p),
         JobResult::FilesChanged => {
             // Пока идут задачи, обновление отложено: после них оно и так будет или его
             // запустит флаг `stale`. Так подряд идущие изменения не копят очередь Refresh.
@@ -943,6 +1062,9 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
         }
         JobResult::Finished { job, result } => {
             r.busy = r.busy.saturating_sub(1);
+            if matches!(job, "fetch" | "pull" | "push") {
+                r.progress = None;
+            }
             match result {
                 Ok(()) => {
                     if job == "commit" {
@@ -1599,7 +1721,7 @@ mod tests {
         };
         assert!(reduce(&mut s, again).is_empty());
 
-        let progress = CloneProgress {
+        let progress = Progress {
             phase: "Receiving objects".into(),
             percent: Some(40),
         };
@@ -1790,5 +1912,104 @@ mod tests {
                 job: Job::DeleteBranch("dev".into())
             }]
         );
+    }
+
+    #[test]
+    fn network_jobs_track_progress_and_can_be_cancelled() {
+        let (mut s, id) = with_branches();
+        let fx = reduce(&mut s, Action::Fetch);
+        assert_eq!(
+            fx,
+            [Effect::Spawn {
+                repo: id,
+                job: Job::Fetch
+            }]
+        );
+        job_started(&mut s, id);
+        // Пока идёт сетевая задача, вторая не ставится.
+        assert!(reduce(&mut s, Action::Pull).is_empty());
+        let step = Progress {
+            phase: "Receiving objects".into(),
+            percent: Some(30),
+        };
+        apply_result(&mut s, id, JobResult::Progress(step.clone()));
+        assert_eq!(s.active_repo().unwrap().progress, Some(step));
+        assert_eq!(reduce(&mut s, Action::CancelJob), [Effect::CancelJob(id)]);
+        let fx = apply_result(
+            &mut s,
+            id,
+            JobResult::Finished {
+                job: "fetch",
+                result: Ok(()),
+            },
+        );
+        assert!(is_refresh(&fx));
+        assert_eq!(s.active_repo().unwrap().progress, None);
+        assert!(reduce(&mut s, Action::CancelJob).is_empty());
+    }
+
+    #[test]
+    fn push_sets_upstream_only_when_missing() {
+        let (mut s, id) = with_branches();
+        let push = |s: &mut AppState| reduce(s, Action::Push);
+        assert_eq!(
+            push(&mut s),
+            [Effect::Spawn {
+                repo: id,
+                job: Job::Push {
+                    set_upstream: Some(("origin".into(), "main".into()))
+                }
+            }]
+        );
+        s.active_repo_mut().unwrap().progress = None;
+        let r = s.active_repo_mut().unwrap();
+        r.refs[0].upstream = Some("refs/remotes/origin/main".into());
+        assert_eq!(
+            push(&mut s),
+            [Effect::Spawn {
+                repo: id,
+                job: Job::Push { set_upstream: None }
+            }]
+        );
+        // Без remote-веток push объясняет, что делать, а не запускает git.
+        let r = s.active_repo_mut().unwrap();
+        r.progress = None;
+        r.refs.retain(|r| r.kind != RefKind::RemoteBranch);
+        r.refs[0].upstream = None;
+        assert!(push(&mut s).is_empty());
+        assert_eq!(s.notifications.len(), 1);
+    }
+
+    #[test]
+    fn prompts_queue_and_answers() {
+        let mut s = AppState::new();
+        for (id, text) in [
+            (1, "Username for 'https://h': "),
+            (2, "Password for 'https://u@h': "),
+        ] {
+            let fx = apply_result(
+                &mut s,
+                RepoId::APP,
+                JobResult::Prompt {
+                    id,
+                    text: text.into(),
+                },
+            );
+            assert!(fx.is_empty());
+        }
+        assert!(!s.prompts[0].secret);
+        assert!(s.prompts[1].secret);
+        assert_eq!(
+            reduce(&mut s, Action::AnswerPrompt(Some("u".into()))),
+            [Effect::AnswerPrompt {
+                id: 1,
+                answer: Some("u".into())
+            }]
+        );
+        assert_eq!(
+            reduce(&mut s, Action::AnswerPrompt(None)),
+            [Effect::AnswerPrompt { id: 2, answer: None }]
+        );
+        assert!(reduce(&mut s, Action::AnswerPrompt(None)).is_empty());
     }
 }

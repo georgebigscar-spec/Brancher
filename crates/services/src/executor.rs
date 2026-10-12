@@ -39,6 +39,12 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
                 checkout,
             } => git.create_branch(repo, name, start, *checkout, cancel)?,
             Job::DeleteBranch(name) => git.delete_branch(repo, name, true, cancel)?,
+            Job::Fetch => git.fetch(repo, cancel, &mut |p| emit(JobResult::Progress(p)))?,
+            Job::Pull => git.pull(repo, cancel, &mut |p| emit(JobResult::Progress(p)))?,
+            Job::Push { set_upstream } => {
+                let upstream = set_upstream.as_ref().map(|(r, b)| (r.as_str(), b.as_str()));
+                git.push(repo, upstream, cancel, &mut |p| emit(JobResult::Progress(p)))?
+            }
             Job::Diff(target) => {
                 let diff = git.diff(repo, target, cancel).map(|mut files| {
                     crate::highlight::highlight(&mut files);

@@ -1,6 +1,4 @@
-//! `git clone --progress` и разбор строк прогресса из stderr.
-
-use brancher_core::CloneProgress;
+//! `git clone --progress`; строки прогресса разбирает [`super::progress`].
 
 pub fn args(url: &str, dest: &str) -> Vec<String> {
     // `--` — чтобы URL, начинающийся с `-`, не стал опцией (NFR-10).
@@ -9,33 +7,10 @@ pub fn args(url: &str, dest: &str) -> Vec<String> {
         .to_vec()
 }
 
-/// `Receiving objects:  45% (450/1000), 1.20 MiB | 1.00 MiB/s` → этап и процент.
-/// Строки без процента (`Cloning into 'x'...`) — этап без процента.
-pub fn parse_progress(line: &str) -> Option<CloneProgress> {
-    let line = line.trim();
-    let line = line.strip_prefix("remote:").map_or(line, str::trim);
-    if line.is_empty() {
-        return None;
-    }
-    let Some((phase, rest)) = line.split_once(':') else {
-        return Some(CloneProgress {
-            phase: line.trim_end_matches("...").to_owned(),
-            percent: None,
-        });
-    };
-    let percent = rest
-        .split_once('%')
-        .and_then(|(n, _)| n.trim().parse::<u8>().ok())
-        .filter(|p| *p <= 100);
-    Some(CloneProgress {
-        phase: phase.trim().to_owned(),
-        percent,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::progress::parse_progress;
 
     fn p(line: &str) -> Option<(String, Option<u8>)> {
         parse_progress(line).map(|p| (p.phase, p.percent))
