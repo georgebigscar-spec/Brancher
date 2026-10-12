@@ -92,6 +92,15 @@ fn classify(roots: &[PathBuf], path: &Path) -> Kind {
     }
 }
 
+/// Внутри `.git` события самих каталогов (Windows сообщает о них при любом чтении и записи
+/// внутри, в том числе нашим же git) — шум: настоящие изменения приходят событиями файлов.
+fn classify_event(roots: &[PathBuf], path: &Path) -> Kind {
+    match classify(roots, path) {
+        Kind::Meta if path.is_dir() => Kind::Noise,
+        kind => kind,
+    }
+}
+
 /// Пока значение живо, репозиторий наблюдается.
 pub(crate) struct RepoWatcher {
     _watcher: RecommendedWatcher,
@@ -123,7 +132,11 @@ pub(crate) fn start(
             let _ = tx.send(Kind::Tree(None));
         }
         for path in &event.paths {
-            match classify(&roots, path) {
+            let kind = classify_event(&roots, path);
+            if cfg!(test) {
+                eprintln!("watch event {:?} {}: {kind:?}", event.kind, path.display());
+            }
+            match kind {
                 Kind::Noise => {}
                 Kind::Meta if activity.own() => {}
                 kind => {
@@ -225,6 +238,29 @@ mod tests {
         assert_eq!(k("/r/.git/logs/HEAD"), Kind::Noise);
         // Каталог с похожим именем — обычный файл рабочей копии.
         assert_eq!(k("/r/.github/ci.yml"), Kind::Tree(Some(".github/ci.yml".into())));
+    }
+
+    #[test]
+    fn git_directories_are_noise() {
+        let root = std::env::temp_dir().join(format!("brancher-classify-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".git").join("refs")).unwrap();
+        std::fs::write(root.join(".git").join("index"), "").unwrap();
+        let roots = [root.clone()];
+        assert_eq!(classify_event(&roots, &root.join(".git")), Kind::Noise);
+        assert_eq!(
+            classify_event(&roots, &root.join(".git").join("refs")),
+            Kind::Noise
+        );
+        assert_eq!(
+            classify_event(&roots, &root.join(".git").join("index")),
+            Kind::Meta
+        );
+        // Удалённый файл (ветку удалили) — по-прежнему изменение.
+        assert_eq!(
+            classify_event(&roots, &root.join(".git").join("HEAD")),
+            Kind::Meta
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
