@@ -14,6 +14,7 @@ pub mod remote;
 pub mod stage;
 pub mod stash;
 pub mod status;
+pub mod tag;
 
 /// Разбивает вывод по NUL, отбрасывая пустой хвост.
 pub(crate) fn split_nul(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {

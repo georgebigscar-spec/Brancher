@@ -549,3 +549,65 @@ fn blame_and_file_history() {
     assert_eq!(old.lines.len(), 2);
     assert_eq!(old.commits.len(), 1);
 }
+
+#[test]
+fn tags_cherry_pick_and_revert() {
+    use brancher_core::Operation;
+    let repo = TempRepo::new("tags");
+    let (g, c) = (git(), CancelToken::new());
+    let p = repo.path();
+    let commit = |file: &str, text: &str, msg: &str| {
+        repo.write(file, text);
+        g.stage(p, &[file.into()], &c).unwrap();
+        g.commit(p, msg, false, &c).unwrap();
+        g.status(p, &c).unwrap().head.unwrap()
+    };
+    let init = commit("a.txt", "a\n", "init");
+    g.create_tag(p, "v1", &init, "", &c).unwrap();
+    g.create_tag(p, "v1-notes", "main", "Первый релиз\n\nподробности", &c)
+        .unwrap();
+    let tags: Vec<_> = g
+        .refs(p, &c)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.kind == RefKind::Tag)
+        .map(|r| (r.name, r.target))
+        .collect();
+    assert_eq!(
+        tags,
+        [("v1".into(), init.clone()), ("v1-notes".into(), init.clone())]
+    );
+    g.delete_tag(p, "v1", &c).unwrap();
+    assert_eq!(
+        g.refs(p, &c)
+            .unwrap()
+            .iter()
+            .filter(|r| r.kind == RefKind::Tag)
+            .count(),
+        1
+    );
+
+    // Cherry-pick коммита из другой ветки.
+    g.create_branch(p, "dev", "main", true, &c).unwrap();
+    let feature = commit("b.txt", "b\n", "feature");
+    g.switch(p, "main", &c).unwrap();
+    g.cherry_pick(p, &feature, false, &c).unwrap();
+    assert_eq!(fs::read_to_string(p.join("b.txt")).unwrap(), "b\n");
+    assert_eq!(g.log(p, 1, &c).unwrap()[0].subject, "feature");
+
+    // Revert с сообщением по умолчанию.
+    let head = g.status(p, &c).unwrap().head.unwrap();
+    g.revert(p, &head, false, &c).unwrap();
+    assert!(!p.join("b.txt").exists());
+    assert!(g.log(p, 1, &c).unwrap()[0].subject.starts_with("Revert"));
+
+    // Конфликт cherry-pick оставляет операцию идти.
+    commit("a.txt", "main\n", "main edit");
+    g.switch(p, "dev", &c).unwrap();
+    let dev_edit = commit("a.txt", "dev\n", "dev edit");
+    g.switch(p, "main", &c).unwrap();
+    g.cherry_pick(p, &dev_edit, false, &c).unwrap();
+    assert_eq!(g.status(p, &c).unwrap().operation, Some(Operation::CherryPick));
+    g.abort_operation(p, Operation::CherryPick, &c).unwrap();
+    assert_eq!(g.status(p, &c).unwrap().operation, None);
+}

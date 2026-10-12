@@ -24,6 +24,7 @@ pub fn show(ui: &mut Ui, repo: &RepoState, settings: &Settings, actions: &mut Ve
         }
     }
     crate::branches::new_branch_dialog(ui.ctx(), actions);
+    crate::tags::new_tag_dialog(ui.ctx(), actions);
     crate::stash::dialog(ui.ctx(), actions);
     toolbar(ui, repo, actions);
     ui.separator();
@@ -157,6 +158,7 @@ fn history(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
         None => crate::graph::column_width(&repo.graph),
     };
     let count = repo.history_filter.as_ref().map_or(repo.history.len(), Vec::len);
+    let current = repo.status.as_ref().and_then(|s| s.branch.as_deref());
     if count == 0 {
         widgets::muted(ui, "Ничего не найдено.");
         return;
@@ -178,7 +180,7 @@ fn history(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
                 if response.clicked() {
                     actions.push(Action::SelectCommit(Some(c.id.clone())));
                 }
-                crate::branches::commit_menu(&response, c);
+                crate::branches::commit_menu(&response, c, current, actions);
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }

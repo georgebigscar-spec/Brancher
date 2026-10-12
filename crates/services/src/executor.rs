@@ -60,6 +60,17 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
                     .file_log(repo, path, brancher_core::FILE_HISTORY_LIMIT, cancel)
                     .map_err(Into::into),
             }),
+            Job::CreateTag {
+                name,
+                target,
+                message,
+            } => git.create_tag(repo, name, target, message, cancel)?,
+            Job::DeleteTag(name) => git.delete_tag(repo, name, cancel)?,
+            Job::PushTag { remote, name } => {
+                git.push_tag(repo, remote, name, cancel, &mut |p| emit(JobResult::Progress(p)))?
+            }
+            Job::CherryPick { commit, mainline } => git.cherry_pick(repo, commit, *mainline, cancel)?,
+            Job::Revert { commit, mainline } => git.revert(repo, commit, *mainline, cancel)?,
             Job::Merge(target) => git.merge(repo, target, cancel)?,
             Job::Rebase(onto) => git.rebase(repo, onto, cancel)?,
             Job::Continue(op) => git.continue_operation(repo, *op, cancel)?,

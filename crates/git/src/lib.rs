@@ -313,6 +313,57 @@ impl Git {
         }
     }
 
+    /// Тег на `target`; непустое `message` делает его аннотированным.
+    pub fn create_tag(
+        &self,
+        repo: &Path,
+        name: &str,
+        target: &str,
+        message: &str,
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        let annotated = !message.trim().is_empty();
+        let args = commands::tag::create_args(name, target, annotated);
+        let stdin = annotated.then_some(message.as_bytes());
+        self.run_args(repo, &args, stdin, cancel)
+    }
+
+    pub fn delete_tag(&self, repo: &Path, name: &str, cancel: &CancelToken) -> Result<(), GitError> {
+        self.run_args(repo, &commands::tag::delete_args(name), None, cancel)
+    }
+
+    pub fn push_tag(
+        &self,
+        repo: &Path,
+        remote: &str,
+        name: &str,
+        cancel: &CancelToken,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> Result<(), GitError> {
+        self.run_progress(repo, &commands::tag::push_args(remote, name), cancel, on_progress)
+    }
+
+    /// Cherry-pick и revert; остановка на конфликтах — не ошибка, как у merge.
+    pub fn cherry_pick(
+        &self,
+        repo: &Path,
+        commit: &str,
+        mainline: bool,
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        self.start_operation(repo, &commands::tag::cherry_pick_args(commit, mainline), cancel)
+    }
+
+    pub fn revert(
+        &self,
+        repo: &Path,
+        commit: &str,
+        mainline: bool,
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        self.start_operation(repo, &commands::tag::revert_args(commit, mainline), cancel)
+    }
+
     pub fn fetch(
         &self,
         repo: &Path,

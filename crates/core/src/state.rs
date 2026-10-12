@@ -78,6 +78,26 @@ pub enum Job {
     },
     /// История коммитов одного файла.
     FileLog(String),
+    /// Тег на `target`; непустое `message` — аннотированный тег.
+    CreateTag {
+        name: String,
+        target: String,
+        message: String,
+    },
+    DeleteTag(String),
+    PushTag {
+        remote: String,
+        name: String,
+    },
+    /// `mainline` — коммит слияния: изменения относительно первого родителя.
+    CherryPick {
+        commit: Oid,
+        mainline: bool,
+    },
+    Revert {
+        commit: Oid,
+        mainline: bool,
+    },
     /// Слить ветку (ссылку) в текущую.
     Merge(String),
     /// Перебазировать текущую ветку на ссылку.
@@ -127,6 +147,11 @@ impl Job {
             Job::StashApply { pop: false, .. } => "stash apply",
             Job::StashApply { pop: true, .. } => "stash pop",
             Job::StashDrop { .. } => "stash drop",
+            Job::CreateTag { .. } => "tag",
+            Job::DeleteTag(_) => "delete-tag",
+            Job::PushTag { .. } => "push tag",
+            Job::CherryPick { .. } => "cherry-pick",
+            Job::Revert { .. } => "revert",
             Job::Merge(_) => "merge",
             Job::Rebase(_) => "rebase",
             Job::Continue(op) => match op {
@@ -147,7 +172,10 @@ impl Job {
 
     /// Сетевая задача: показывает прогресс и её можно отменить.
     pub fn is_network(&self) -> bool {
-        matches!(self, Job::Fetch | Job::Pull | Job::Push { .. })
+        matches!(
+            self,
+            Job::Fetch | Job::Pull | Job::Push { .. } | Job::PushTag { .. }
+        )
     }
 }
 
@@ -299,6 +327,17 @@ pub enum Action {
     SetHistoryQuery(String),
     /// Показывать только коммиты, достижимые из HEAD.
     SetHeadOnly(bool),
+    CreateTag {
+        name: String,
+        target: String,
+        message: String,
+    },
+    /// Удалить локальный тег (спрашивает подтверждение).
+    DeleteTag(String),
+    /// Отправить тег на remote по умолчанию.
+    PushTag(String),
+    CherryPick(Oid),
+    Revert(Oid),
     /// Слить ветку, тег или remote-ветку в текущую.
     Merge(String),
     /// Перебазировать текущую ветку на ссылку (спрашивает подтверждение).
@@ -743,6 +782,32 @@ pub fn branch_name_error(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Имя тега: те же правила, что у веток.
+pub fn tag_name_error(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        Some("Введите имя тега")
+    } else {
+        branch_name_error(name)
+    }
+}
+
+/// Remote по умолчанию: `origin`, если есть, иначе первый из известных по remote-веткам.
+fn default_remote(repo: &RepoState) -> Result<&str, &'static str> {
+    let mut remotes = repo
+        .refs
+        .iter()
+        .filter(|r| r.kind == RefKind::RemoteBranch)
+        .filter_map(|r| r.name.split_once('/').map(|(remote, _)| remote));
+    let first = remotes
+        .next()
+        .ok_or("У репозитория нет remote-веток: добавьте remote и сделайте fetch.")?;
+    Ok(if first == "origin" || remotes.any(|r| r == "origin") {
+        "origin"
+    } else {
+        first
+    })
+}
+
 /// Задача push для текущей ветки: без upstream — `-u` на `origin` (или единственный remote).
 fn push_job(repo: &RepoState) -> Result<Job, &'static str> {
     let head = repo
@@ -753,20 +818,7 @@ fn push_job(repo: &RepoState) -> Result<Job, &'static str> {
     if head.upstream.is_some() {
         return Ok(Job::Push { set_upstream: None });
     }
-    let mut remotes: Vec<&str> = repo
-        .refs
-        .iter()
-        .filter(|r| r.kind == RefKind::RemoteBranch)
-        .filter_map(|r| r.name.split_once('/').map(|(remote, _)| remote))
-        .collect();
-    remotes.dedup();
-    let remote = if remotes.contains(&"origin") {
-        "origin"
-    } else {
-        *remotes
-            .first()
-            .ok_or("У репозитория нет remote-веток: добавьте remote и сделайте fetch.")?
-    };
+    let remote = default_remote(repo)?;
     Ok(Job::Push {
         set_upstream: Some((remote.to_owned(), head.name.clone())),
     })
@@ -1200,7 +1252,61 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     repo.refilter();
                     vec![]
                 }
-                Action::Merge(_) | Action::Rebase(_) if repo.operation().is_some() => {
+                Action::CreateTag {
+                    name,
+                    target,
+                    message,
+                } => {
+                    let name = name.trim().to_owned();
+                    let exists = repo.refs.iter().any(|r| r.kind == RefKind::Tag && r.name == name);
+                    let error = tag_name_error(&name)
+                        .map(str::to_owned)
+                        .or_else(|| exists.then(|| format!("Тег {name} уже есть")));
+                    match error {
+                        Some(details) => {
+                            state.notifications.push(Notification {
+                                severity: Severity::Info,
+                                title: "Тег не создан".into(),
+                                details,
+                            });
+                            vec![]
+                        }
+                        None => spawn(Job::CreateTag {
+                            name,
+                            target,
+                            message,
+                        }),
+                    }
+                }
+                Action::DeleteTag(name) => {
+                    if repo.refs.iter().any(|r| r.kind == RefKind::Tag && r.name == name) {
+                        repo.confirm = Some(Confirm {
+                            title: format!("Удалить тег {name}?"),
+                            description: "Тег удалится только локально; на remote он останется.".into(),
+                            action: "Удалить".into(),
+                            job: Job::DeleteTag(name),
+                        });
+                    }
+                    vec![]
+                }
+                Action::PushTag(_) if repo.progress.is_some() => vec![],
+                Action::PushTag(name) => match default_remote(repo).map(str::to_owned) {
+                    Ok(remote) => {
+                        repo.progress = Some(Progress::default());
+                        spawn(Job::PushTag { remote, name })
+                    }
+                    Err(details) => {
+                        state.notifications.push(Notification {
+                            severity: Severity::Info,
+                            title: "Push тега невозможен".into(),
+                            details: details.into(),
+                        });
+                        vec![]
+                    }
+                },
+                Action::Merge(_) | Action::Rebase(_) | Action::CherryPick(_) | Action::Revert(_)
+                    if repo.operation().is_some() =>
+                {
                     let op = repo.operation().map_or("", Operation::name);
                     state.notifications.push(Notification {
                         severity: Severity::Info,
@@ -1210,6 +1316,14 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     vec![]
                 }
                 Action::Merge(target) => spawn(Job::Merge(target)),
+                Action::CherryPick(commit) => {
+                    let mainline = repo.history.iter().any(|c| c.id == commit && c.is_merge());
+                    spawn(Job::CherryPick { commit, mainline })
+                }
+                Action::Revert(commit) => {
+                    let mainline = repo.history.iter().any(|c| c.id == commit && c.is_merge());
+                    spawn(Job::Revert { commit, mainline })
+                }
                 Action::Rebase(onto) => {
                     let branch = repo.status.as_ref().and_then(|s| s.branch.clone());
                     match branch {
@@ -1474,7 +1588,7 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
         }
         JobResult::Finished { job, result } => {
             r.busy = r.busy.saturating_sub(1);
-            if matches!(job, "fetch" | "pull" | "push") {
+            if matches!(job, "fetch" | "pull" | "push" | "push tag") {
                 r.progress = None;
             }
             match result {
@@ -2709,5 +2823,61 @@ mod tests {
         // Новая история — фильтр пересчитывается.
         apply_result(&mut s, id, JobResult::History(Ok(History::default())));
         assert_eq!(s.active_repo().unwrap().history_filter, Some(vec![]));
+    }
+
+    #[test]
+    fn tags_cherry_pick_and_revert_actions() {
+        let (mut s, _) = with_branches();
+        let spawned = |fx: Vec<Effect>| match &fx[..] {
+            [Effect::Spawn { job, .. }] => job.clone(),
+            other => panic!("unexpected {other:?}"),
+        };
+        let create = |name: &str| Action::CreateTag {
+            name: name.into(),
+            target: "abc".into(),
+            message: String::new(),
+        };
+        assert_eq!(
+            spawned(reduce(&mut s, create(" v1 "))),
+            Job::CreateTag {
+                name: "v1".into(),
+                target: "abc".into(),
+                message: String::new()
+            }
+        );
+        assert!(reduce(&mut s, create("bad name")).is_empty());
+        assert!(reduce(&mut s, create("")).is_empty());
+        assert_eq!(s.notifications.len(), 2);
+
+        // Push тега — на origin, с прогрессом.
+        assert_eq!(
+            spawned(reduce(&mut s, Action::PushTag("v1".into()))),
+            Job::PushTag {
+                remote: "origin".into(),
+                name: "v1".into()
+            }
+        );
+        assert!(s.active_repo().unwrap().progress.is_some());
+
+        let merge = Commit {
+            id: "m".into(),
+            parents: vec!["a".into(), "b".into()],
+            ..Default::default()
+        };
+        s.tabs[0].history = vec![merge];
+        assert_eq!(
+            spawned(reduce(&mut s, Action::CherryPick("m".into()))),
+            Job::CherryPick {
+                commit: "m".into(),
+                mainline: true
+            }
+        );
+        assert_eq!(
+            spawned(reduce(&mut s, Action::Revert("x".into()))),
+            Job::Revert {
+                commit: "x".into(),
+                mainline: false
+            }
+        );
     }
 }

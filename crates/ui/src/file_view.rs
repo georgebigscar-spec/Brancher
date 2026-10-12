@@ -155,6 +155,7 @@ fn history_rows(ui: &mut Ui, repo: &RepoState, commits: &[Commit], actions: &mut
     let t = widgets::Theme::get(ui.ctx());
     let mono = FontId::monospace(13.0);
     let body = FontId::proportional(14.0);
+    let current = repo.status.as_ref().and_then(|s| s.branch.as_deref());
     ui.spacing_mut().item_spacing.y = 0.0;
     egui::ScrollArea::vertical()
         .id_salt("file-history")
@@ -166,7 +167,7 @@ fn history_rows(ui: &mut Ui, repo: &RepoState, commits: &[Commit], actions: &mut
                 if response.clicked() {
                     actions.push(Action::SelectCommit(Some(c.id.clone())));
                 }
-                crate::branches::commit_menu(&response, c);
+                crate::branches::commit_menu(&response, c, current, actions);
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }
