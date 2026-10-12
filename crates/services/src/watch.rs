@@ -163,6 +163,9 @@ pub(crate) fn start(
 
 /// Есть ли в пачке что-то, кроме игнорируемых git файлов.
 fn relevant(git: &Git, root: &Path, batch: Vec<Kind>) -> bool {
+    if cfg!(test) {
+        eprintln!("watch batch: {batch:?}");
+    }
     let mut paths = Vec::new();
     for kind in batch {
         match kind {
@@ -194,6 +197,9 @@ fn relevant(git: &Git, root: &Path, batch: Vec<Kind>) -> bool {
         &CancelToken::new(),
         &[0, 1],
     );
+    if cfg!(test) {
+        eprintln!("check-ignore {paths:?}: {ignored:?}");
+    }
     match ignored {
         Ok(out) => out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()).count() < paths.len(),
         Err(_) => true,
