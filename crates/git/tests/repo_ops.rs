@@ -1037,3 +1037,48 @@ fn merge_conflicts_preview_leaves_working_copy_alone() {
     assert_eq!(st.changes.len(), 1);
     assert_eq!(fs::read_to_string(p.join("a.txt")).unwrap(), "dev\n");
 }
+
+#[test]
+fn merged_branches_are_marked_and_deleted_together() {
+    let repo = TempRepo::new("merged");
+    let (g, c) = (git(), CancelToken::new());
+    let p = repo.path();
+    let commit = |file: &str, msg: &str| {
+        repo.write(file, msg);
+        g.stage(p, &[file.into()], &c).unwrap();
+        g.commit(p, msg, false, &c).unwrap();
+    };
+    commit("a.txt", "base");
+    for b in ["done", "wip", "fresh"] {
+        g.create_branch(p, b, "main", false, &c).unwrap();
+    }
+    g.switch(p, "done", &c).unwrap();
+    commit("d.txt", "done work");
+    g.switch(p, "wip", &c).unwrap();
+    commit("w.txt", "wip work");
+    g.switch(p, "main", &c).unwrap();
+    g.merge(p, "done", &c).unwrap();
+    commit("m.txt", "after merge");
+
+    let merged = |g: &Git| -> Vec<String> {
+        g.refs(p, &c)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.merged)
+            .map(|r| r.name)
+            .collect()
+    };
+    // fresh отстаёт от main, но своих коммитов нет — тоже слита; wip — нет.
+    assert_eq!(merged(&g), ["done", "fresh"]);
+    g.delete_branches(p, &["done".into(), "fresh".into()], &c)
+        .unwrap();
+    let left: Vec<String> = g
+        .refs(p, &c)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.kind == RefKind::LocalBranch)
+        .map(|r| r.name)
+        .collect();
+    assert_eq!(left, ["main", "wip"]);
+    assert!(merged(&g).is_empty());
+}

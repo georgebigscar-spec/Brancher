@@ -49,6 +49,8 @@ pub enum Job {
     },
     /// Удалить локальную ветку, даже не слитую (после подтверждения).
     DeleteBranch(String),
+    /// Удалить несколько веток (слитые в основную).
+    DeleteBranches(Vec<String>),
     Fetch,
     /// Fetch одного remote.
     FetchRemote(String),
@@ -199,7 +201,7 @@ impl Job {
             Job::ApplyPatch { reverse: true, .. } => "unstage-lines",
             Job::Switch(_) | Job::SwitchTrack(_) => "switch",
             Job::CreateBranch { .. } => "branch",
-            Job::DeleteBranch(_) => "delete-branch",
+            Job::DeleteBranch(_) | Job::DeleteBranches(_) => "delete-branch",
             Job::Fetch | Job::FetchRemote(_) => "fetch",
             Job::AddRemote { .. } => "remote add",
             Job::RemoveRemote(_) => "remote remove",
@@ -265,6 +267,7 @@ impl Job {
             Job::Switch(b) | Job::SwitchTrack(b) => format!("Переключение на {b}"),
             Job::CreateBranch { name, .. } => format!("Ветка {name}"),
             Job::DeleteBranch(b) => format!("Удаление ветки {b}"),
+            Job::DeleteBranches(b) => format!("Удаление слитых веток: {}", b.join(", ")),
             Job::Pull => "Pull".into(),
             Job::StashPush { .. } => "Stash".into(),
             Job::StashApply { pop: true, .. } => "Stash pop".into(),
@@ -440,6 +443,8 @@ pub enum Action {
     },
     /// Удалить локальную ветку (спрашивает подтверждение).
     DeleteBranch(String),
+    /// Удалить все локальные ветки, слитые в основную (с подтверждением).
+    DeleteMerged,
     Fetch,
     Pull,
     Push,
@@ -1527,10 +1532,43 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                         repo.confirm = Some(Confirm {
                             title: format!("Удалить ветку {name}?"),
                             description: "Если её коммитов нет в других ветках, вернуть ветку можно \
-                                          через «История» → «Отменить»."
+                                          через «История», кнопка «Отменить»."
                                 .into(),
                             action: "Удалить".into(),
                             job: Job::DeleteBranch(b.name.clone()),
+                        });
+                    }
+                    vec![]
+                }
+                Action::DeleteMerged => {
+                    let names: Vec<String> = repo
+                        .refs
+                        .iter()
+                        .filter(|r| r.kind == RefKind::LocalBranch && r.merged && !r.is_head)
+                        .map(|r| r.name.clone())
+                        .collect();
+                    if names.is_empty() {
+                        state.notifications.push(Notification {
+                            severity: Severity::Info,
+                            title: "Нет слитых веток".into(),
+                            details: "Все локальные ветки содержат коммиты, которых нет в основной.".into(),
+                        });
+                    } else {
+                        let trunk = repo
+                            .refs
+                            .iter()
+                            .find(|r| {
+                                r.kind == RefKind::LocalBranch && (r.name == "main" || r.name == "master")
+                            })
+                            .map_or("main", |r| r.name.as_str());
+                        repo.confirm = Some(Confirm {
+                            title: format!("Удалить слитые ветки ({})?", names.len()),
+                            description: format!(
+                                "Все их коммиты уже есть в {trunk}:\n{}\n\nВернуть можно через «История», кнопка «Отменить».",
+                                bullet_list(&names)
+                            ),
+                            action: "Удалить".into(),
+                            job: Job::DeleteBranches(names),
                         });
                     }
                     vec![]
@@ -1573,7 +1611,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                         repo.confirm = Some(Confirm {
                             title: format!("Удалить stash@{{{index}}}?"),
                             description: format!(
-                                "«{}». Вернуть запись можно через «История» → «Отменить».",
+                                "«{}». Вернуть запись можно через «История», кнопка «Отменить».",
                                 st.message
                             ),
                             action: "Удалить".into(),
@@ -2220,7 +2258,7 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
         } => {
             // Ошибка пробного слияния (старый git) не мешает: операция идёт как раньше.
             let files = result.unwrap_or_default();
-            let list = conflict_list(&files);
+            let list = bullet_list(&files);
             if rebase {
                 let branch = r
                     .status
@@ -2362,8 +2400,8 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
     effects
 }
 
-/// Список файлов для подтверждения: первые 10 и сколько ещё.
-fn conflict_list(files: &[String]) -> String {
+/// Список для подтверждения: первые 10 пунктов и сколько ещё.
+fn bullet_list(files: &[String]) -> String {
     const SHOWN: usize = 10;
     let mut list: Vec<String> = files.iter().take(SHOWN).map(|f| format!("• {f}")).collect();
     if files.len() > SHOWN {
@@ -3092,6 +3130,7 @@ mod tests {
             ahead: 0,
             behind: 0,
             upstream_gone: false,
+            merged: false,
         }
     }
 
@@ -3109,6 +3148,27 @@ mod tests {
             ])),
         );
         (s, id)
+    }
+
+    #[test]
+    fn delete_merged_asks_with_list() {
+        let (mut s, id) = with_branches();
+        assert!(reduce(&mut s, Action::DeleteMerged).is_empty());
+        assert!(s.active_repo().unwrap().confirm.is_none());
+        assert_eq!(s.notifications.len(), 1);
+        let mut refs = vec![
+            branch("main", RefKind::LocalBranch, true),
+            branch("dev", RefKind::LocalBranch, false),
+            branch("old", RefKind::LocalBranch, false),
+        ];
+        refs[1].merged = true;
+        refs[2].merged = true;
+        apply_result(&mut s, id, JobResult::Refs(Ok(refs)));
+        assert!(reduce(&mut s, Action::DeleteMerged).is_empty());
+        let confirm = s.active_repo().unwrap().confirm.clone().unwrap();
+        assert!(confirm.title.contains("(2)") && confirm.description.contains("уже есть в main"));
+        assert_eq!(confirm.job, Job::DeleteBranches(vec!["dev".into(), "old".into()]));
+        assert!(confirm.job.undo_title().is_some());
     }
 
     #[test]

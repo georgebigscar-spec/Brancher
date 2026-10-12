@@ -53,6 +53,9 @@ pub struct GitRef {
     pub behind: u32,
     /// Upstream задан, но ветки на remote больше нет.
     pub upstream_gone: bool,
+    /// Локальная ветка целиком слита в основную (`main` или `master`) и отстаёт от неё:
+    /// её можно удалить без потери коммитов.
+    pub merged: bool,
 }
 
 /// Вид изменения файла — одна буква из `git status --porcelain=v2`.

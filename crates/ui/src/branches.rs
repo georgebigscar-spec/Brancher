@@ -46,7 +46,22 @@ pub fn refs(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
                 crate::remotes::section(ui, repo, &mut row, actions);
                 actions.extend(row_actions);
             } else {
-                ui.label(RichText::new(title).strong());
+                let merged = repo
+                    .refs
+                    .iter()
+                    .filter(|r| r.kind == kind && r.merged && !r.is_head)
+                    .count();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(title).strong());
+                    if merged > 0
+                        && ui
+                            .small_button(format!("Удалить слитые ({merged})"))
+                            .on_hover_text("Удалить локальные ветки, все коммиты которых уже есть в основной")
+                            .clicked()
+                    {
+                        actions.push(Action::DeleteMerged);
+                    }
+                });
                 for r in repo.refs.iter().filter(|r| r.kind == kind) {
                     ref_row(ui, r, current, actions);
                 }
@@ -67,7 +82,18 @@ fn ref_row(ui: &mut Ui, r: &GitRef, current: Option<&str>, actions: &mut Vec<Act
     } else {
         RichText::new(text)
     };
-    let response = ui.add(egui::Label::new(label).sense(egui::Sense::click()).truncate());
+    let mut job = egui::text::LayoutJob::default();
+    let style = ui.style();
+    label.append_to(&mut job, style, egui::FontSelection::Default, egui::Align::Center);
+    if r.merged {
+        RichText::new("  слита").small().weak().append_to(
+            &mut job,
+            style,
+            egui::FontSelection::Default,
+            egui::Align::Center,
+        );
+    }
+    let response = ui.add(egui::Label::new(job).sense(egui::Sense::click()).truncate());
     let switch = match r.kind {
         RefKind::LocalBranch if !r.is_head => Some(Action::SwitchBranch(r.name.clone())),
         RefKind::RemoteBranch => Some(Action::CheckoutRemote(r.name.clone())),
@@ -76,6 +102,9 @@ fn ref_row(ui: &mut Ui, r: &GitRef, current: Option<&str>, actions: &mut Vec<Act
     let response = match r.kind {
         RefKind::LocalBranch if r.is_head => response.on_hover_text("Текущая ветка"),
         RefKind::Tag => response,
+        _ if r.merged => response.on_hover_text(
+            "Все коммиты ветки уже есть в основной — её можно удалить. Двойной клик — переключиться",
+        ),
         _ => response.on_hover_text("Двойной клик — переключиться"),
     };
     if response.double_clicked() {
