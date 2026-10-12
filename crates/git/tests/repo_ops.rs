@@ -674,3 +674,90 @@ fn remotes_add_fetch_edit_remove_and_push_tag() {
     g.add_remote(p, "-v", &url, &c).unwrap();
     assert_eq!(g.remotes(p, &c).unwrap()[0].name, "-v");
 }
+
+#[test]
+fn interactive_rebase_reword_squash_fixup_drop_and_reorder() {
+    use brancher_core::{Operation, RebaseAction as A, RebaseStep};
+    let repo = TempRepo::new("irebase");
+    let (g, c) = (git(), CancelToken::new());
+    let p = repo.path();
+    let commit = |file: &str, text: &str, msg: &str| {
+        repo.write(file, text);
+        g.stage(p, &[file.into()], &c).unwrap();
+        g.commit(p, msg, false, &c).unwrap();
+        g.status(p, &c).unwrap().head.unwrap()
+    };
+    let root = commit("base.txt", "base\n", "base");
+    let a = commit("a.txt", "a\n", "add a\n\nтело a");
+    let b = commit("b.txt", "b\n", "add b");
+    let b2 = commit("b.txt", "b2\n", "fix b");
+    let d = commit("d.txt", "d\n", "add d");
+    let e = commit("e.txt", "e\n", "add e");
+    assert_eq!(g.commit_message(p, &a, &c).unwrap(), "add a\n\nтело a");
+
+    let step = |action, commit: &str, message: Option<&str>| RebaseStep {
+        action,
+        commit: commit.into(),
+        subject: String::new(),
+        message: message.map(Into::into),
+    };
+    // e переезжает в начало, a переименовывается, b2 сливается с b, d удаляется.
+    g.interactive_rebase(
+        p,
+        Some(&root),
+        &[
+            step(A::Pick, &e, None),
+            step(A::Reword, &a, Some("Добавить a\n\nновое тело")),
+            step(A::Pick, &b, None),
+            step(A::Fixup, &b2, None),
+            step(A::Drop, &d, None),
+        ],
+        &c,
+    )
+    .unwrap();
+    let log: Vec<_> = g.log(p, 10, &c).unwrap().into_iter().map(|c| c.subject).collect();
+    assert_eq!(log, ["add b", "Добавить a", "add e", "base"]);
+    let head = g.status(p, &c).unwrap();
+    assert_eq!(head.operation, None);
+    assert_eq!(
+        g.commit_message(p, "HEAD~1", &c).unwrap(),
+        "Добавить a\n\nновое тело"
+    );
+    assert_eq!(fs::read_to_string(p.join("b.txt")).unwrap(), "b2\n");
+    assert!(!p.join("d.txt").exists());
+
+    // Squash объединяет сообщения; с корня истории — `--root`.
+    let log = g.log(p, 10, &c).unwrap();
+    let ids: Vec<_> = log.iter().rev().map(|c| c.id.clone()).collect();
+    g.interactive_rebase(
+        p,
+        None,
+        &[
+            step(A::Pick, &ids[0], None),
+            step(A::Squash, &ids[1], None),
+            step(A::Pick, &ids[2], None),
+            step(A::Pick, &ids[3], None),
+        ],
+        &c,
+    )
+    .unwrap();
+    let log = g.log(p, 10, &c).unwrap();
+    assert_eq!(log.len(), 3);
+    assert_eq!(g.commit_message(p, &log[2].id, &c).unwrap(), "base\n\nadd e");
+
+    // Перестановка с конфликтом останавливает rebase, но не считается ошибкой.
+    let x1 = commit("x.txt", "1\n", "x1");
+    let x2 = commit("x.txt", "2\n", "x2");
+    g.interactive_rebase(
+        p,
+        Some(&log[0].id),
+        &[step(A::Pick, &x2, None), step(A::Pick, &x1, None)],
+        &c,
+    )
+    .unwrap();
+    let st = g.status(p, &c).unwrap();
+    assert_eq!(st.operation, Some(Operation::Rebase));
+    assert_eq!(st.conflicts().count(), 1);
+    g.abort_operation(p, Operation::Rebase, &c).unwrap();
+    assert_eq!(g.status(p, &c).unwrap().head.unwrap(), x2);
+}

@@ -27,6 +27,9 @@ pub fn show(ui: &mut Ui, repo: &RepoState, settings: &Settings, actions: &mut Ve
     crate::tags::new_tag_dialog(ui.ctx(), actions);
     crate::stash::dialog(ui.ctx(), actions);
     crate::remotes::dialog(ui.ctx(), repo, actions);
+    if let Some(plan) = &repo.rebase_plan {
+        crate::rebase_plan::dialog(ui.ctx(), plan, actions);
+    }
     toolbar(ui, repo, actions);
     ui.separator();
     let height = ui.available_height();

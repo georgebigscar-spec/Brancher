@@ -139,6 +139,9 @@ pub fn commit_menu(response: &egui::Response, c: &Commit, current: Option<&str>,
         if widgets::menu_item(ui, "Revert", None).clicked() {
             actions.push(Action::Revert(c.id.clone()));
         }
+        if current.is_some() && widgets::menu_item(ui, "Interactive rebase отсюда…", None).clicked() {
+            actions.push(Action::PlanRebase(c.id.clone()));
+        }
         widgets::menu_separator(ui);
         if widgets::menu_item(ui, "Копировать SHA", None).clicked() {
             ui.ctx().copy_text(c.id.clone());
