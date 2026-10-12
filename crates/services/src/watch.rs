@@ -168,7 +168,9 @@ fn relevant(git: &Git, root: &Path, batch: Vec<Kind>) -> bool {
         match kind {
             Kind::Noise => {}
             Kind::Meta | Kind::Tree(None) => return true,
+            // git ждёт пути через `/`; на Windows notify отдаёт их через `\\`.
             Kind::Tree(Some(p)) => match p.to_str() {
+                Some(s) if cfg!(windows) => paths.push(s.replace('\\', "/")),
                 Some(s) => paths.push(s.to_owned()),
                 None => return true,
             },
