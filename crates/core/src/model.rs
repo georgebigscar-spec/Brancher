@@ -135,6 +135,30 @@ pub struct Stash {
     pub message: String,
 }
 
+/// Коммит, которому принадлежат строки blame.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BlameCommit {
+    pub id: Oid,
+    pub author: String,
+    /// Unix-время автора в секундах.
+    pub time: i64,
+    pub summary: String,
+}
+
+impl BlameCommit {
+    /// Строки, которых ещё нет ни в одном коммите (blame рабочей копии).
+    pub fn is_uncommitted(&self) -> bool {
+        self.id.bytes().all(|b| b == b'0')
+    }
+}
+
+/// Результат `git blame`: для каждой строки файла — номер коммита в `commits` и текст.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Blame {
+    pub commits: Vec<BlameCommit>,
+    pub lines: Vec<(usize, String)>,
+}
+
 /// Незавершённая операция git, которая ждёт разрешения конфликтов.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {

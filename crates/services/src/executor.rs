@@ -49,6 +49,17 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
             Job::StashPush { message, untracked } => git.stash_push(repo, message, *untracked, cancel)?,
             Job::StashApply { index, id, pop } => git.stash_apply(repo, *index, id, *pop, cancel)?,
             Job::StashDrop { index, id } => git.stash_drop(repo, *index, id, cancel)?,
+            Job::Blame { path, rev } => emit(JobResult::Blame {
+                path: path.clone(),
+                rev: rev.clone(),
+                result: git.blame(repo, path, rev.as_deref(), cancel).map_err(Into::into),
+            }),
+            Job::FileLog(path) => emit(JobResult::FileLog {
+                path: path.clone(),
+                result: git
+                    .file_log(repo, path, brancher_core::FILE_HISTORY_LIMIT, cancel)
+                    .map_err(Into::into),
+            }),
             Job::Merge(target) => git.merge(repo, target, cancel)?,
             Job::Rebase(onto) => git.rebase(repo, onto, cancel)?,
             Job::Continue(op) => git.continue_operation(repo, *op, cancel)?,

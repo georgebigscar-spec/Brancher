@@ -71,6 +71,13 @@ pub enum Job {
         index: usize,
         id: Oid,
     },
+    /// Blame файла в коммите или в рабочей копии (`rev: None`).
+    Blame {
+        path: String,
+        rev: Option<Oid>,
+    },
+    /// История коммитов одного файла.
+    FileLog(String),
     /// Слить ветку (ссылку) в текущую.
     Merge(String),
     /// Перебазировать текущую ветку на ссылку.
@@ -87,7 +94,15 @@ pub enum Job {
 impl Job {
     /// Изменяет ли задача репозиторий (такие задачи идут строго по одной, раздел 3).
     pub fn is_write(&self) -> bool {
-        !matches!(self, Job::Refresh { .. } | Job::Diff(_))
+        !self.is_read()
+    }
+
+    /// Только читает репозиторий: после неё обновляться не нужно.
+    pub fn is_read(&self) -> bool {
+        matches!(
+            self,
+            Job::Refresh { .. } | Job::Diff(_) | Job::Blame { .. } | Job::FileLog(_)
+        )
     }
 
     pub fn label(&self) -> &'static str {
@@ -97,6 +112,8 @@ impl Job {
             Job::Unstage(_) => "unstage",
             Job::Commit { .. } => "commit",
             Job::Diff(_) => "diff",
+            Job::Blame { .. } => "blame",
+            Job::FileLog(_) => "log",
             Job::ApplyPatch { cached: false, .. } => "discard-lines",
             Job::ApplyPatch { reverse: false, .. } => "stage-lines",
             Job::ApplyPatch { reverse: true, .. } => "unstage-lines",
@@ -157,6 +174,15 @@ pub enum JobResult {
     Diff {
         target: DiffTarget,
         result: Result<Diff, JobError>,
+    },
+    Blame {
+        path: String,
+        rev: Option<Oid>,
+        result: Result<Blame, JobError>,
+    },
+    FileLog {
+        path: String,
+        result: Result<Vec<Commit>, JobError>,
     },
     /// Файлы репозитория изменились снаружи (редактор, терминал) — нужно обновиться.
     FilesChanged,
@@ -262,6 +288,13 @@ pub enum Action {
     PopStash(usize),
     /// Удалить запись (спрашивает подтверждение).
     DropStash(usize),
+    /// Показать blame файла: в коммите `rev` или в рабочей копии.
+    ShowBlame {
+        path: String,
+        rev: Option<Oid>,
+    },
+    ShowFileHistory(String),
+    CloseFileView,
     /// Слить ветку, тег или remote-ветку в текущую.
     Merge(String),
     /// Перебазировать текущую ветку на ссылку (спрашивает подтверждение).
@@ -383,6 +416,32 @@ pub struct Confirm {
     pub job: Job,
 }
 
+/// Blame или история файла в нижней половине центральной панели (вместо diff).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileView {
+    /// `blame` — `None`, пока идёт загрузка.
+    Blame {
+        path: String,
+        rev: Option<Oid>,
+        blame: Option<Blame>,
+    },
+    History {
+        path: String,
+        commits: Option<Vec<Commit>>,
+    },
+}
+
+impl FileView {
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Blame { path, .. } | Self::History { path, .. } => path,
+        }
+    }
+}
+
+/// Сколько коммитов показывать в истории файла.
+pub const FILE_HISTORY_LIMIT: usize = 2_000;
+
 #[derive(Debug, Clone, Default)]
 pub struct RepoState {
     pub id: Option<RepoId>,
@@ -403,6 +462,8 @@ pub struct RepoState {
     pub diff_selection: BTreeSet<(usize, usize, usize)>,
     /// Строка последнего клика — начало диапазона для Shift+клик.
     pub diff_anchor: Option<(usize, usize, usize)>,
+    /// Blame или история файла; пока открыт, diff закрыт.
+    pub file_view: Option<FileView>,
     /// Необратимое действие, которое ждёт подтверждения в диалоге.
     pub confirm: Option<Confirm>,
     pub commit_message: String,
@@ -429,6 +490,7 @@ impl RepoState {
         }
         self.diff_target = Some(target.clone());
         self.diff = None;
+        self.file_view = None;
         self.clear_selection();
         vec![Effect::Spawn {
             repo: self.id(),
@@ -1039,6 +1101,29 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     }
                     vec![]
                 }
+                Action::ShowBlame { path, rev } => {
+                    repo.close_diff();
+                    repo.selected_commit = None;
+                    repo.file_view = Some(FileView::Blame {
+                        path: path.clone(),
+                        rev: rev.clone(),
+                        blame: None,
+                    });
+                    spawn(Job::Blame { path, rev })
+                }
+                Action::ShowFileHistory(path) => {
+                    repo.close_diff();
+                    repo.selected_commit = None;
+                    repo.file_view = Some(FileView::History {
+                        path: path.clone(),
+                        commits: None,
+                    });
+                    spawn(Job::FileLog(path))
+                }
+                Action::CloseFileView => {
+                    repo.file_view = None;
+                    vec![]
+                }
                 Action::Merge(_) | Action::Rebase(_) if repo.operation().is_some() => {
                     let op = repo.operation().map_or("", Operation::name);
                     state.notifications.push(Notification {
@@ -1249,6 +1334,41 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
                 }
             }
         }
+        JobResult::Blame { path, rev, result } => {
+            let shown = matches!(
+                &r.file_view,
+                Some(FileView::Blame { path: p, rev: v, .. }) if *p == path && *v == rev
+            );
+            if shown {
+                match result {
+                    Ok(b) => {
+                        if let Some(FileView::Blame { blame, .. }) = &mut r.file_view {
+                            *blame = Some(b);
+                        }
+                    }
+                    Err(e) => {
+                        r.file_view = None;
+                        error = Some((format!("Не удалось получить blame {path}"), e));
+                    }
+                }
+            }
+        }
+        JobResult::FileLog { path, result } => {
+            let shown = matches!(&r.file_view, Some(FileView::History { path: p, .. }) if *p == path);
+            if shown {
+                match result {
+                    Ok(c) => {
+                        if let Some(FileView::History { commits, .. }) = &mut r.file_view {
+                            *commits = Some(c);
+                        }
+                    }
+                    Err(e) => {
+                        r.file_view = None;
+                        error = Some((format!("Не удалось получить историю {path}"), e));
+                    }
+                }
+            }
+        }
         JobResult::Status(Err(e))
         | JobResult::Refs(Err(e))
         | JobResult::Stashes(Err(e))
@@ -1282,7 +1402,7 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
                     }
                     if job == "refresh" {
                         effects.extend(refresh_change_diff(r));
-                    } else if job != "diff" {
+                    } else if !matches!(job, "diff" | "blame" | "log") {
                         effects.push(Effect::Spawn {
                             repo,
                             job: Job::Refresh { history_limit: limit },
@@ -2371,5 +2491,81 @@ mod tests {
             spawned(reduce(&mut s, Action::Confirm(true))),
             Job::Abort(Operation::Merge)
         );
+    }
+
+    #[test]
+    fn blame_and_file_history_views() {
+        let mut s = AppState::new();
+        let id = open(&mut s, "/a");
+        let spawned = |fx: Vec<Effect>| match &fx[..] {
+            [Effect::Spawn { job, .. }] => job.clone(),
+            other => panic!("unexpected {other:?}"),
+        };
+        let blame = |s: &mut AppState, rev: Option<&str>| {
+            reduce(
+                s,
+                Action::ShowBlame {
+                    path: "a.rs".into(),
+                    rev: rev.map(Into::into),
+                },
+            )
+        };
+        assert_eq!(
+            spawned(blame(&mut s, Some("c1"))),
+            Job::Blame {
+                path: "a.rs".into(),
+                rev: Some("c1".into())
+            }
+        );
+        // Ответ на прежний запрос (другой rev) не подменяет текущий.
+        blame(&mut s, None);
+        let result = |rev: Option<&str>| JobResult::Blame {
+            path: "a.rs".into(),
+            rev: rev.map(Into::into),
+            result: Ok(Blame::default()),
+        };
+        apply_result(&mut s, id, result(Some("c1")));
+        assert!(matches!(
+            s.active_repo().unwrap().file_view,
+            Some(FileView::Blame { blame: None, .. })
+        ));
+        apply_result(&mut s, id, result(None));
+        assert!(matches!(
+            s.active_repo().unwrap().file_view,
+            Some(FileView::Blame { blame: Some(_), .. })
+        ));
+        // Чтение не вызывает обновления.
+        let fx = apply_result(
+            &mut s,
+            id,
+            JobResult::Finished {
+                job: "blame",
+                result: Ok(()),
+            },
+        );
+        assert!(fx.is_empty());
+
+        assert_eq!(
+            spawned(reduce(&mut s, Action::ShowFileHistory("a.rs".into()))),
+            Job::FileLog("a.rs".into())
+        );
+        apply_result(
+            &mut s,
+            id,
+            JobResult::FileLog {
+                path: "a.rs".into(),
+                result: Err(JobError {
+                    message: "нет".into(),
+                    stderr: String::new(),
+                }),
+            },
+        );
+        assert!(s.active_repo().unwrap().file_view.is_none());
+        assert!(!s.notifications.is_empty());
+
+        // Открытие diff закрывает blame.
+        blame(&mut s, None);
+        reduce(&mut s, Action::SelectCommit(Some("c1".into())));
+        assert!(s.active_repo().unwrap().file_view.is_none());
     }
 }

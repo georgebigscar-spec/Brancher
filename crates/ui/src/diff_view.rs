@@ -143,6 +143,24 @@ struct Paint<'a> {
 }
 
 impl Paint<'_> {
+    /// Меню заголовка файла: blame и история. Blame — в том же коммите, что и diff;
+    /// удалённый в коммите файл — в его родителе.
+    fn file_menu(&self, response: &egui::Response, f: usize, actions: &mut Vec<Action>) {
+        let file = &self.diff.files[f];
+        let target = match (&self.repo.diff_target, &file.new_path, &file.old_path) {
+            (Some(DiffTarget::Change { untracked: true, .. }), _, _) => None,
+            (Some(DiffTarget::Change { path, .. }), _, _) => Some((path.clone(), None)),
+            (Some(DiffTarget::Commit { id, .. }), Some(new), _) => Some((new.clone(), Some(id.clone()))),
+            (Some(DiffTarget::Commit { id, .. }), None, Some(old)) => {
+                Some((old.clone(), Some(format!("{id}^"))))
+            }
+            _ => None,
+        };
+        if let Some((path, rev)) = target {
+            crate::repo_view::file_menu(response, &path, rev.as_deref(), actions);
+        }
+    }
+
     fn is_change(&self, f: usize, h: usize, l: usize) -> bool {
         let kind = self.diff.files[f].hunks[h].lines[l].kind;
         matches!(kind, LineKind::Added | LineKind::Removed)
@@ -343,9 +361,13 @@ fn rows(ui: &mut Ui, repo: &RepoState, diff: &Diff, side_by_side: bool, actions:
 }
 
 fn unified_row(ui: &mut Ui, p: &Paint, row: DiffRow, width: f32, actions: &mut Vec<Action>) {
-    let clickable = matches!(row, DiffRow::Line(f, h, l) if p.selectable && p.is_change(f, h, l));
+    let clickable = matches!(row, DiffRow::Line(f, h, l) if p.selectable && p.is_change(f, h, l))
+        || matches!(row, DiffRow::File(_));
     let sense = if clickable { Sense::click() } else { Sense::hover() };
     let (rect, mut response) = ui.allocate_exact_size(vec2(width, ROW_HEIGHT), sense);
+    if let DiffRow::File(f) = row {
+        p.file_menu(&response, f, actions);
+    }
     if clickable {
         response = response.on_hover_text_at_pointer(SELECT_HINT);
     }
@@ -376,7 +398,15 @@ fn unified_row(ui: &mut Ui, p: &Paint, row: DiffRow, width: f32, actions: &mut V
 }
 
 fn split_row(ui: &mut Ui, p: &Paint, row: SplitRow, width: f32, actions: &mut Vec<Action>) {
-    let (rect, _) = ui.allocate_exact_size(vec2(width, ROW_HEIGHT), Sense::hover());
+    let sense = if matches!(row, SplitRow::File(_)) {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(width, ROW_HEIGHT), sense);
+    if let SplitRow::File(f) = row {
+        p.file_menu(&response, f, actions);
+    }
     if !ui.is_rect_visible(rect) {
         return;
     }

@@ -508,3 +508,44 @@ fn merge_and_rebase_with_conflicts() {
     // Ошибка, не связанная с конфликтами, остаётся ошибкой.
     assert!(g.merge(p, "nope", &c).is_err());
 }
+
+#[test]
+fn blame_and_file_history() {
+    let repo = TempRepo::new("blame");
+    let (g, c) = (git(), CancelToken::new());
+    let p = repo.path();
+    let commit = |file: &str, text: &str, msg: &str| {
+        repo.write(file, text);
+        g.stage(p, &[file.into()], &c).unwrap();
+        g.commit(p, msg, false, &c).unwrap();
+    };
+    commit("a.txt", "один\nдва\n", "first");
+    commit("b.txt", "x\n", "other file");
+    commit("a.txt", "один\nдва\nтри\n", "second");
+    let first = g.log(p, 10, &c).unwrap()[2].id.clone();
+
+    let history = g.file_log(p, "a.txt", 100, &c).unwrap();
+    let subjects: Vec<_> = history.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(subjects, ["second", "first"]);
+
+    repo.write("a.txt", "один\nдва\nтри\nчетыре\n");
+    let blame = g.blame(p, "a.txt", None, &c).unwrap();
+    let who: Vec<_> = blame
+        .lines
+        .iter()
+        .map(|(i, _)| {
+            let c = &blame.commits[*i];
+            if c.is_uncommitted() {
+                "—"
+            } else {
+                c.summary.as_str()
+            }
+        })
+        .collect();
+    assert_eq!(who, ["first", "first", "second", "—"]);
+    assert_eq!(blame.lines[3].1, "четыре");
+
+    let old = g.blame(p, "a.txt", Some(&first), &c).unwrap();
+    assert_eq!(old.lines.len(), 2);
+    assert_eq!(old.commits.len(), 1);
+}

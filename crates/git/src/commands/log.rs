@@ -20,6 +20,19 @@ pub fn args(limit: usize) -> Vec<String> {
     ]
 }
 
+/// История одного файла с переименованиями (`--follow`), новые сверху.
+pub fn file_args(path: &str, limit: usize) -> Vec<String> {
+    vec![
+        "log".into(),
+        "--follow".into(),
+        "--no-color".into(),
+        format!("--max-count={limit}"),
+        FORMAT.into(),
+        "--".into(),
+        path.into(),
+    ]
+}
+
 pub fn parse(out: &[u8]) -> Result<Vec<Commit>, GitError> {
     out.split(|b| *b == 0x1e)
         .map(|r| r.strip_prefix(b"\n").unwrap_or(r))
