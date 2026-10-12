@@ -11,6 +11,11 @@ use crate::patch::{self, LineRef};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RepoId(pub u64);
 
+impl RepoId {
+    /// Адрес результатов, которые не относятся к вкладке (клонирование).
+    pub const APP: RepoId = RepoId(0);
+}
+
 /// Фоновая задача для одного репозитория. Выполняется worker-ом из `brancher-services`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Job {
@@ -79,6 +84,16 @@ pub enum JobResult {
     },
     /// Файлы репозитория изменились снаружи (редактор, терминал) — нужно обновиться.
     FilesChanged,
+    /// Этап клонирования `id` (адресуется [`RepoId::APP`]).
+    CloneProgress {
+        id: u64,
+        progress: CloneProgress,
+    },
+    /// Клонирование `id` закончено: путь нового репозитория или ошибка.
+    Cloned {
+        id: u64,
+        result: Result<PathBuf, JobError>,
+    },
     /// Задача завершена (после этого счётчик занятости уменьшается).
     Finished {
         job: &'static str,
@@ -137,6 +152,12 @@ pub enum Action {
     Commit,
     DismissNotification(usize),
     SetSideBySide(bool),
+    /// Клонировать `url` в папку `dest` (её создаст git) и открыть результат.
+    Clone {
+        url: String,
+        dest: PathBuf,
+    },
+    CancelClone,
 }
 
 /// Побочный эффект, который должен выполнить слой services.
@@ -152,6 +173,38 @@ pub enum Effect {
         repo: RepoId,
         job: Job,
     },
+    Clone {
+        id: u64,
+        url: String,
+        dest: PathBuf,
+    },
+    CancelClone,
+}
+
+/// Строка прогресса `git clone --progress`: этап и процент, если git его сообщил.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CloneProgress {
+    pub phase: String,
+    pub percent: Option<u8>,
+}
+
+/// Идущее клонирование.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Cloning {
+    /// Отличает результаты этого клонирования от отменённого прежде.
+    pub id: u64,
+    pub url: String,
+    pub dest: PathBuf,
+    pub progress: CloneProgress,
+}
+
+/// Имя папки для клона, как его выбирает git: последний сегмент URL без `.git`.
+/// `https://github.com/user/repo.git` → `repo`, `git@host:user/repo` → `repo`.
+pub fn clone_dir_name(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches(['/', '\\']);
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    let name = url.rsplit(['/', '\\', ':']).next()?;
+    (!name.is_empty() && name != "." && name != "..").then(|| name.to_owned())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,6 +401,8 @@ pub struct AppState {
     pub notifications: Vec<Notification>,
     pub history_limit: usize,
     pub settings: Settings,
+    /// Идущее клонирование (одно за раз).
+    pub cloning: Option<Cloning>,
     next_id: u64,
 }
 
@@ -431,6 +486,25 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.active = Some(state.tabs.len() - 1);
             vec![Effect::StartRepo { id, path }, refresh(id)]
         }
+        Action::Clone { url, dest } => {
+            let url = url.trim().to_owned();
+            if state.cloning.is_some() || url.is_empty() {
+                return vec![];
+            }
+            state.next_id += 1;
+            let id = state.next_id;
+            state.cloning = Some(Cloning {
+                id,
+                url: url.clone(),
+                dest: dest.clone(),
+                progress: CloneProgress::default(),
+            });
+            vec![Effect::Clone { id, url, dest }]
+        }
+        Action::CancelClone => match state.cloning.take() {
+            Some(_) => vec![Effect::CancelClone],
+            None => vec![],
+        },
         Action::ShowWelcome => {
             state.active = None;
             vec![]
@@ -638,6 +712,29 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
     } else {
         state.history_limit
     };
+    let result = match result {
+        JobResult::CloneProgress { id, progress } => {
+            if let Some(c) = state.cloning.as_mut().filter(|c| c.id == id) {
+                c.progress = progress;
+            }
+            return vec![];
+        }
+        // Другой `id` или нет `cloning` — клонирование отменили, результат не нужен.
+        JobResult::Cloned { id, result } => {
+            if !state.cloning.as_ref().is_some_and(|c| c.id == id) {
+                return vec![];
+            }
+            state.cloning = None;
+            return match result {
+                Ok(path) => reduce(state, Action::OpenRepo(path)),
+                Err(e) => {
+                    state.notify_error("Не удалось клонировать репозиторий", &e);
+                    vec![]
+                }
+            };
+        }
+        other => other,
+    };
     let Some(r) = state.repo_mut(repo) else {
         return vec![];
     }; // вкладку уже закрыли
@@ -670,6 +767,9 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
         }
         JobResult::Status(Err(e)) | JobResult::Refs(Err(e)) | JobResult::History(Err(e)) => {
             error = Some(("Не удалось прочитать репозиторий".to_owned(), e))
+        }
+        JobResult::CloneProgress { .. } | JobResult::Cloned { .. } => {
+            unreachable!("обработано выше")
         }
         JobResult::FilesChanged => {
             // Пока идут задачи, обновление отложено: после них оно и так будет или его
@@ -1294,5 +1394,104 @@ mod tests {
         changed.files[0].hunks[0].lines[0].text = "a2".into();
         reload(&mut s, changed);
         assert!(s.active_repo().unwrap().diff_selection.is_empty());
+    }
+
+    #[test]
+    fn clone_dir_name_like_git() {
+        let n = |u| clone_dir_name(u);
+        assert_eq!(n("https://github.com/user/repo.git"), Some("repo".into()));
+        assert_eq!(n("https://github.com/user/repo/"), Some("repo".into()));
+        assert_eq!(n("git@github.com:user/repo.git"), Some("repo".into()));
+        assert_eq!(n("host:repo"), Some("repo".into()));
+        assert_eq!(n(r"C:\src\proj"), Some("proj".into()));
+        assert_eq!(n(""), None);
+        assert_eq!(n("https://x/.."), None);
+    }
+
+    fn clone_id(fx: &[Effect]) -> u64 {
+        match fx {
+            [Effect::Clone { id, .. }] => *id,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_reports_progress_and_opens_result() {
+        let mut s = AppState::new();
+        let fx = reduce(
+            &mut s,
+            Action::Clone {
+                url: " https://h/r.git ".into(),
+                dest: "/w/r".into(),
+            },
+        );
+        let id = clone_id(&fx);
+        assert_eq!(
+            fx,
+            [Effect::Clone {
+                id,
+                url: "https://h/r.git".into(),
+                dest: "/w/r".into()
+            }]
+        );
+        // Второе клонирование, пока идёт первое, не начинается.
+        let again = Action::Clone {
+            url: "u".into(),
+            dest: "/w/u".into(),
+        };
+        assert!(reduce(&mut s, again).is_empty());
+
+        let progress = CloneProgress {
+            phase: "Receiving objects".into(),
+            percent: Some(40),
+        };
+        let fx = apply_result(
+            &mut s,
+            RepoId::APP,
+            JobResult::CloneProgress {
+                id,
+                progress: progress.clone(),
+            },
+        );
+        assert!(fx.is_empty());
+        assert_eq!(s.cloning.as_ref().unwrap().progress, progress);
+
+        let done = JobResult::Cloned {
+            id,
+            result: Ok("/w/r".into()),
+        };
+        let fx = apply_result(&mut s, RepoId::APP, done);
+        assert!(matches!(fx[0], Effect::StartRepo { .. }));
+        assert!(s.cloning.is_none());
+        assert_eq!(s.active_repo().unwrap().path, PathBuf::from("/w/r"));
+    }
+
+    #[test]
+    fn clone_error_notifies_but_cancelled_clone_is_silent() {
+        let mut s = AppState::new();
+        let clone = || Action::Clone {
+            url: "https://h/r".into(),
+            dest: "/w/r".into(),
+        };
+        let err = |id| JobResult::Cloned {
+            id,
+            result: Err(JobError {
+                message: "git завершился с кодом 128".into(),
+                stderr: "fatal: repository not found".into(),
+            }),
+        };
+        let first = clone_id(&reduce(&mut s, clone()));
+        apply_result(&mut s, RepoId::APP, err(first));
+        assert_eq!(s.notifications.len(), 1);
+        assert!(s.notifications[0].details.contains("not found"));
+
+        let second = clone_id(&reduce(&mut s, clone()));
+        assert_eq!(reduce(&mut s, Action::CancelClone), [Effect::CancelClone]);
+        // Сразу новое клонирование: поздний ответ отменённого его не трогает.
+        let third = clone_id(&reduce(&mut s, clone()));
+        assert!(apply_result(&mut s, RepoId::APP, err(second)).is_empty());
+        assert_eq!(s.cloning.as_ref().map(|c| c.id), Some(third));
+        assert_eq!(s.notifications.len(), 1);
+        assert!(s.tabs.is_empty());
     }
 }

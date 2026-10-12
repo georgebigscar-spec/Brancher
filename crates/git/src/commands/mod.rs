@@ -1,6 +1,7 @@
 //! Построители аргументов и парсеры. Всё здесь — чистые функции без запуска процессов.
 
 pub mod apply;
+pub mod clone;
 pub mod commit;
 pub mod diff;
 pub mod log;

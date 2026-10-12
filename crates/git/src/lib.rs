@@ -14,7 +14,7 @@ pub use version::{GitVersion, MIN_GIT_VERSION};
 
 use std::path::Path;
 
-use brancher_core::{Commit, DiffTarget, FileDiff, GitRef, RepoStatus};
+use brancher_core::{CloneProgress, Commit, DiffTarget, FileDiff, GitRef, RepoStatus};
 
 /// Высокоуровневые операции поверх [`Runner`].
 #[derive(Debug, Clone)]
@@ -114,6 +114,26 @@ impl Git {
     ) -> Result<(), GitError> {
         let args = commands::commit::args(amend);
         self.run_args(repo, &args, Some(message.as_bytes()), cancel)
+    }
+
+    /// Клонирует `url` в `dest`, передавая этапы прогресса в `on_progress`.
+    pub fn clone_repo(
+        &self,
+        url: &str,
+        dest: &Path,
+        cancel: &CancelToken,
+        on_progress: &mut dyn FnMut(CloneProgress),
+    ) -> Result<(), GitError> {
+        let dest = dest.to_string_lossy();
+        let args = commands::clone::args(url, &dest);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.runner
+            .run_with_progress(None, &args, cancel, &mut |line| {
+                if let Some(p) = commands::clone::parse_progress(line) {
+                    on_progress(p);
+                }
+            })
+            .map(|_| ())
     }
 
     fn run_args(
