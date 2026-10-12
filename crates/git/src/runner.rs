@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -146,6 +147,30 @@ impl Runner {
         cancel: &CancelToken,
         ok_codes: &[i32],
     ) -> Result<Output, GitError> {
+        self.run_inner(cwd, args, stdin, cancel, ok_codes, None)
+    }
+
+    /// Как [`Runner::run`], но каждая строка stderr сразу передаётся в `on_line`
+    /// (git пишет прогресс `--progress` в stderr, обновляя строку через `\r`).
+    pub fn run_with_progress(
+        &self,
+        cwd: Option<&Path>,
+        args: &[&str],
+        cancel: &CancelToken,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<Output, GitError> {
+        self.run_inner(cwd, args, None, cancel, &[0], Some(on_line))
+    }
+
+    fn run_inner(
+        &self,
+        cwd: Option<&Path>,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+        cancel: &CancelToken,
+        ok_codes: &[i32],
+        mut on_line: Option<&mut dyn FnMut(&str)>,
+    ) -> Result<Output, GitError> {
         if cancel.is_cancelled() {
             return Err(GitError::Cancelled);
         }
@@ -192,13 +217,32 @@ impl Runner {
             let _ = out_pipe.read_to_end(&mut buf);
             buf
         });
+        let (chunks_tx, chunks) = mpsc::channel::<Vec<u8>>();
+        let streaming = on_line.is_some();
         let err_reader = thread::spawn(move || {
             let mut buf = Vec::new();
-            let _ = err_pipe.read_to_end(&mut buf);
+            if !streaming {
+                let _ = err_pipe.read_to_end(&mut buf);
+                return buf;
+            }
+            let mut chunk = [0u8; 4096];
+            while let Ok(n @ 1..) = err_pipe.read(&mut chunk) {
+                buf.extend_from_slice(&chunk[..n]);
+                let _ = chunks_tx.send(chunk[..n].to_vec());
+            }
             buf
         });
+        let mut lines = Lines::default();
+        let mut feed = |on_line: &mut Option<&mut dyn FnMut(&str)>| {
+            if let Some(f) = on_line.as_deref_mut() {
+                for chunk in chunks.try_iter() {
+                    lines.push(&chunk, f);
+                }
+            }
+        };
 
         let status = loop {
+            feed(&mut on_line);
             if let Some(status) = child.try_wait().map_err(GitError::Spawn)? {
                 break status;
             }
@@ -214,6 +258,7 @@ impl Runner {
         let _ = writer.join();
         let stdout = out_reader.join().unwrap_or_default();
         let stderr = String::from_utf8_lossy(&err_reader.join().unwrap_or_default()).into_owned();
+        feed(&mut on_line);
 
         if status.code().is_some_and(|c| ok_codes.contains(&c)) {
             Ok(Output { stdout, stderr })
@@ -223,5 +268,52 @@ impl Runner {
                 stderr,
             })
         }
+    }
+}
+
+/// Режет поток stderr на строки по `\n` и `\r`; незаконченный хвост ждёт следующего куска.
+#[derive(Default)]
+struct Lines {
+    tail: Vec<u8>,
+}
+
+impl Lines {
+    fn push(&mut self, chunk: &[u8], on_line: &mut dyn FnMut(&str)) {
+        for &b in chunk {
+            if b == b'\n' || b == b'\r' {
+                if !self.tail.is_empty() {
+                    on_line(&String::from_utf8_lossy(&self.tail));
+                    self.tail.clear();
+                }
+            } else {
+                self.tail.push(b);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod lines_tests {
+    use super::Lines;
+
+    #[test]
+    fn splits_on_cr_and_lf_across_chunks() {
+        let mut got = vec![];
+        let mut lines = Lines::default();
+        let mut f = |l: &str| got.push(l.to_owned());
+        lines.push(b"Cloning into 'x'...\nRecei", &mut f);
+        lines.push(
+            b"ving objects:  50% (1/2)\rReceiving objects: 100% (2/2), done.\r\n",
+            &mut f,
+        );
+        lines.push(b"partial", &mut f);
+        assert_eq!(
+            got,
+            [
+                "Cloning into 'x'...",
+                "Receiving objects:  50% (1/2)",
+                "Receiving objects: 100% (2/2), done."
+            ]
+        );
     }
 }

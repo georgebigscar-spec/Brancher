@@ -79,6 +79,8 @@ impl App {
             match effect {
                 Effect::StartRepo { id, path } => jobs.start_repo(id, path),
                 Effect::StopRepo(id) => jobs.stop_repo(id),
+                Effect::Clone { id, url, dest } => jobs.clone_repo(id, url, dest),
+                Effect::CancelClone => jobs.cancel_clone(),
                 Effect::Spawn { repo, job } => {
                     if jobs.spawn(repo, job) {
                         job_started(&mut self.state, repo);

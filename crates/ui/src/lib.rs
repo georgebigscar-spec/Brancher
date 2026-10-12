@@ -14,7 +14,7 @@ use widgets::Theme;
 #[derive(Default)]
 pub struct BrancherUi {
     pub dark: bool,
-    open_path: String,
+    welcome: welcome::Form,
 }
 
 impl BrancherUi {
@@ -38,7 +38,7 @@ impl BrancherUi {
                 ui.separator();
                 notifications(ui, state, &mut actions);
                 match state.active_repo() {
-                    None => welcome::show(ui, state, &mut self.open_path, &mut actions),
+                    None => welcome::show(ui, state, &mut self.welcome, &mut actions),
                     Some(repo) => repo_view::show(ui, repo, &state.settings, &mut actions),
                 }
             });
