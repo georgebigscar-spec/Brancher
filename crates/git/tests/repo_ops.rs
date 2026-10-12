@@ -864,3 +864,86 @@ fn undo_timeline_restores_refs_head_stash_and_uncommitted() {
     assert_eq!(refs, ["extra", "main"]);
     assert!(g.stashes(p, &c).unwrap().is_empty());
 }
+
+#[test]
+fn commit_editing_uncommit_amend_into_and_uncommit_file() {
+    use brancher_core::{RebaseAction as A, RebaseStep};
+    let repo = TempRepo::new("commit-edit");
+    let (g, c) = (git(), CancelToken::new());
+    let p = repo.path();
+    let commit = |files: &[(&str, &str)], msg: &str| {
+        for (f, t) in files {
+            repo.write(f, t);
+            g.stage(p, &[(*f).into()], &c).unwrap();
+        }
+        g.commit(p, msg, false, &c).unwrap();
+        g.status(p, &c).unwrap().head.unwrap()
+    };
+    let subjects = || -> Vec<String> { g.log(p, 20, &c).unwrap().into_iter().map(|c| c.subject).collect() };
+    let step = |action, commit: &str| RebaseStep {
+        action,
+        commit: commit.into(),
+        subject: String::new(),
+        message: None,
+    };
+    let base = commit(&[("base.txt", "base\n")], "base");
+    let a = commit(&[("a.txt", "a\n")], "add a");
+    let b = commit(&[("b.txt", "b\n"), ("c.txt", "c\n")], "add b and c");
+
+    // Последний коммит: файл c.txt уходит из коммита в рабочую копию.
+    g.uncommit_file(p, "c.txt", &c).unwrap();
+    let st = g.status(p, &c).unwrap();
+    assert_eq!(st.changes.len(), 1);
+    assert_eq!(st.changes[0].path, "c.txt");
+    assert_eq!(subjects(), ["add b and c", "add a", "base"]);
+    fs::remove_file(p.join("c.txt")).unwrap();
+
+    // Проиндексированное добавляется в старый коммит, а неиндексированное переживает rebase.
+    let head = g.status(p, &c).unwrap().head.unwrap();
+    repo.write("a.txt", "a2\n");
+    g.stage(p, &["a.txt".into()], &c).unwrap();
+    repo.write("b.txt", "b-unstaged\n");
+    g.amend_into(p, &a, Some(&base), &[step(A::Pick, &a), step(A::Pick, &head)], &c)
+        .unwrap();
+    assert_eq!(subjects(), ["add b and c", "add a", "base"]);
+    let log = g.log(p, 20, &c).unwrap();
+    let files = g
+        .diff(
+            p,
+            &DiffTarget::Commit {
+                id: log[1].id.clone(),
+                parent: Some(base.clone()),
+            },
+            &c,
+        )
+        .unwrap();
+    assert_eq!(files[0].hunks[0].lines.last().unwrap().text, "a2");
+    assert_eq!(fs::read_to_string(p.join("b.txt")).unwrap(), "b-unstaged\n");
+    repo.write("b.txt", "b\n");
+    let _ = b;
+
+    // Отменить старый коммит: его изменения возвращаются в индекс.
+    let log = g.log(p, 20, &c).unwrap();
+    let (a_new, top) = (log[1].id.clone(), log[0].id.clone());
+    g.uncommit(
+        p,
+        &a_new,
+        Some((Some(&base), &[step(A::Drop, &a_new), step(A::Pick, &top)])),
+        &c,
+    )
+    .unwrap();
+    assert_eq!(subjects(), ["add b and c", "base"]);
+    let st = g.status(p, &c).unwrap();
+    assert_eq!(
+        st.staged().map(|c| c.path.as_str()).collect::<Vec<_>>(),
+        ["a.txt"]
+    );
+
+    // Отменить последний коммит.
+    g.uncommit(p, &top, None, &c).unwrap();
+    assert_eq!(subjects(), ["base"]);
+    let st = g.status(p, &c).unwrap();
+    let mut staged: Vec<_> = st.staged().map(|c| c.path.clone()).collect();
+    staged.sort();
+    assert_eq!(staged, ["a.txt", "b.txt"]);
+}

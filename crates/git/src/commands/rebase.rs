@@ -16,7 +16,8 @@ pub fn sequence_editor() -> String {
 
 /// Начать rebase на `base` (родитель первого коммита) или с корня истории.
 pub fn start_args(base: Option<&str>) -> Vec<String> {
-    let mut a = vec!["rebase".to_owned(), "-i".to_owned()];
+    // `--autostash`: незакоммиченные изменения прячутся на время rebase и возвращаются после.
+    let mut a = vec!["rebase".to_owned(), "-i".to_owned(), "--autostash".to_owned()];
     a.push(base.unwrap_or("--root").to_owned());
     a
 }
@@ -74,7 +75,7 @@ mod tests {
              exec git commit --amend --allow-empty --cleanup=strip -F \"$(git rev-parse --git-path brancher-reword/1)\"\n\
              fixup c\ndrop d\n"
         );
-        assert_eq!(start_args(None), ["rebase", "-i", "--root"]);
-        assert_eq!(start_args(Some("abc")), ["rebase", "-i", "abc"]);
+        assert_eq!(start_args(None), ["rebase", "-i", "--autostash", "--root"]);
+        assert_eq!(start_args(Some("abc")), ["rebase", "-i", "--autostash", "abc"]);
     }
 }

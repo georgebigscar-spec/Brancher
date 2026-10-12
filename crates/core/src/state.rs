@@ -128,6 +128,20 @@ pub enum Job {
     },
     /// Полное сообщение коммита (для reword).
     CommitMessage(Oid),
+    /// Отменить коммит, оставив его изменения в индексе; `rebase` — `(база, шаги)` без него,
+    /// если коммит не последний.
+    Uncommit {
+        commit: Oid,
+        rebase: Option<(Option<Oid>, Vec<RebaseStep>)>,
+    },
+    /// Добавить проиндексированное в коммит: план — от него до HEAD.
+    AmendInto {
+        commit: Oid,
+        base: Option<Oid>,
+        steps: Vec<RebaseStep>,
+    },
+    /// Убрать файл из последнего коммита в рабочую копию.
+    UncommitFile(String),
     /// Список снимков ленты отмены.
     Snapshots,
     /// Вернуть репозиторий к снимку.
@@ -199,6 +213,9 @@ impl Job {
             Job::InteractiveRebase { .. } => "rebase -i",
             Job::CommitMessage(_) => "message",
             Job::Snapshots => "oplog",
+            Job::Uncommit { .. } => "uncommit",
+            Job::AmendInto { .. } => "amend into",
+            Job::UncommitFile(_) => "uncommit file",
             Job::Restore { .. } => "restore",
             Job::Continue(op) => match op {
                 Operation::Merge => "merge --continue",
@@ -251,6 +268,9 @@ impl Job {
             Job::Merge(b) => format!("Merge {b}"),
             Job::Rebase(b) => format!("Rebase на {b}"),
             Job::InteractiveRebase { .. } => "Interactive rebase".into(),
+            Job::Uncommit { commit, .. } => format!("Отмена коммита {}", short(commit)),
+            Job::AmendInto { commit, .. } => format!("Изменения в коммит {}", short(commit)),
+            Job::UncommitFile(path) => format!("Файл {path} из коммита"),
             Job::Continue(op) => format!("Продолжение {}", op.name()),
             Job::Abort(op) => format!("Прерывание {}", op.name()),
             Job::ResolveConflict { path, .. } => format!("Разрешение конфликта {path}"),
@@ -476,6 +496,17 @@ pub enum Action {
     },
     CancelRebasePlan,
     RunRebasePlan,
+    /// Изменить сообщение коммита текущей ветки: открыть диалог.
+    EditMessage(Oid),
+    SetEditedMessage(String),
+    SaveMessage,
+    CloseMessageEditor,
+    /// Отменить коммит текущей ветки: изменения вернутся в индекс.
+    Uncommit(Oid),
+    /// Добавить проиндексированные изменения в коммит текущей ветки.
+    AmendInto(Oid),
+    /// Убрать файл из последнего коммита.
+    UncommitFile(String),
     /// Открыть ленту отмены.
     ShowOplog,
     CloseOplog,
@@ -701,6 +732,8 @@ pub struct RepoState {
     pub head_only: bool,
     /// Номера коммитов `history`, прошедших фильтр; `None` — фильтра нет, видна вся история.
     pub history_filter: Option<Vec<usize>>,
+    /// Диалог нового сообщения коммита: `(коммит, сообщение)`; `None` — сообщение загружается.
+    pub message_editor: Option<(Oid, Option<String>)>,
     /// Открытая лента отмены; внутренний `None` — список ещё загружается.
     pub oplog: Option<Option<Vec<Snapshot>>>,
     /// Открытый диалог interactive rebase.
@@ -801,13 +834,6 @@ impl RepoState {
             .branch
             .clone()
             .ok_or("HEAD не на ветке (detached): interactive rebase недоступен")?;
-        if status
-            .changes
-            .iter()
-            .any(|c| c.unstaged != Some(ChangeKind::Untracked))
-        {
-            return Err("В рабочей копии есть изменения: закоммитьте или спрячьте их (Stash)".into());
-        }
         let by_id: std::collections::HashMap<&str, &Commit> =
             self.history.iter().map(|c| (c.id.as_str(), c)).collect();
         let mut chain = vec![];
@@ -1654,6 +1680,10 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 | Action::CherryPick(_)
                 | Action::Revert(_)
                 | Action::PlanRebase(_)
+                | Action::SaveMessage
+                | Action::Uncommit(_)
+                | Action::AmendInto(_)
+                | Action::UncommitFile(_)
                     if repo.operation().is_some() =>
                 {
                     let op = repo.operation().map_or("", Operation::name);
@@ -1732,6 +1762,109 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     }
                     vec![]
                 }
+                Action::EditMessage(id) => {
+                    repo.message_editor = Some((id.clone(), None));
+                    spawn(Job::CommitMessage(id))
+                }
+                Action::SetEditedMessage(m) => {
+                    if let Some((_, msg)) = &mut repo.message_editor {
+                        *msg = Some(m);
+                    }
+                    vec![]
+                }
+                Action::CloseMessageEditor => {
+                    repo.message_editor = None;
+                    vec![]
+                }
+                Action::SaveMessage => {
+                    let Some((id, Some(message))) = repo.message_editor.clone() else {
+                        return vec![];
+                    };
+                    if message.trim().is_empty() {
+                        return vec![];
+                    }
+                    match repo.plan_rebase(&id) {
+                        Ok(mut plan) => {
+                            repo.message_editor = None;
+                            plan.steps[0].action = RebaseAction::Reword;
+                            plan.steps[0].message = Some(message);
+                            spawn(Job::InteractiveRebase {
+                                base: plan.base,
+                                steps: plan.steps,
+                            })
+                        }
+                        Err(details) => {
+                            state.notifications.push(Notification {
+                                severity: Severity::Info,
+                                title: "Сообщение не изменено".into(),
+                                details,
+                            });
+                            vec![]
+                        }
+                    }
+                }
+                Action::Uncommit(id) => {
+                    let head = repo.status.as_ref().and_then(|s| s.head.clone());
+                    let merge = repo.history.iter().any(|c| c.id == id && c.is_merge());
+                    let job = if merge {
+                        Err("Это коммит слияния: отменить его так нельзя (используйте Revert)".to_owned())
+                    } else if head.as_deref() == Some(id.as_str()) {
+                        Ok(Job::Uncommit {
+                            commit: id,
+                            rebase: None,
+                        })
+                    } else {
+                        repo.plan_rebase(&id).map(|mut plan| {
+                            plan.steps[0].action = RebaseAction::Drop;
+                            Job::Uncommit {
+                                commit: id,
+                                rebase: Some((plan.base, plan.steps)),
+                            }
+                        })
+                    };
+                    match job {
+                        Ok(job) => spawn(job),
+                        Err(details) => {
+                            state.notifications.push(Notification {
+                                severity: Severity::Info,
+                                title: "Коммит не отменён".into(),
+                                details,
+                            });
+                            vec![]
+                        }
+                    }
+                }
+                Action::AmendInto(id) => {
+                    let staged = repo.status.as_ref().map_or(0, |s| s.staged().count());
+                    let job = if staged == 0 {
+                        Err("Нет проиндексированных изменений: сначала сделайте stage нужных файлов или строк"
+                            .to_owned())
+                    } else if repo
+                        .status
+                        .as_ref()
+                        .is_some_and(|s| s.conflicts().next().is_some())
+                    {
+                        Err("Сначала разрешите конфликты".to_owned())
+                    } else {
+                        repo.plan_rebase(&id).map(|plan| Job::AmendInto {
+                            commit: id,
+                            base: plan.base,
+                            steps: plan.steps,
+                        })
+                    };
+                    match job {
+                        Ok(job) => spawn(job),
+                        Err(details) => {
+                            state.notifications.push(Notification {
+                                severity: Severity::Info,
+                                title: "Изменения не добавлены".into(),
+                                details,
+                            });
+                            vec![]
+                        }
+                    }
+                }
+                Action::UncommitFile(path) => spawn(Job::UncommitFile(path)),
                 Action::ShowOplog => {
                     repo.oplog = Some(None);
                     spawn(Job::Snapshots)
@@ -2042,6 +2175,11 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
                 let steps = r.rebase_plan.iter_mut().flat_map(|p| p.steps.iter_mut());
                 for s in steps.filter(|s| s.commit == commit && s.message.is_none()) {
                     s.message = Some(m.clone());
+                }
+                if let Some((id, msg @ None)) = &mut r.message_editor {
+                    if *id == commit {
+                        *msg = Some(m);
+                    }
                 }
             }
             Err(e) => error = Some(("Не удалось прочитать сообщение коммита".to_owned(), e)),
@@ -3558,7 +3696,7 @@ mod tests {
         }
         assert!(plan(&s).is_none());
 
-        // С изменениями в рабочей копии план не открывается.
+        // Незакоммиченные изменения не мешают: rebase спрячет их сам (`--autostash`).
         let r = s.active_repo_mut().unwrap();
         r.status.as_mut().unwrap().changes.push(Change {
             path: "f".into(),
@@ -3567,7 +3705,7 @@ mod tests {
             unstaged: Some(ChangeKind::Modified),
         });
         reduce(&mut s, Action::PlanRebase("c".into()));
-        assert!(plan(&s).is_none());
+        assert!(plan(&s).is_some());
     }
 
     #[test]
@@ -3682,5 +3820,90 @@ mod tests {
         assert!(!reloads(&finished(&mut s, "oplog")));
         reduce(&mut s, Action::CloseOplog);
         assert!(!reloads(&finished(&mut s, "commit")));
+    }
+
+    #[test]
+    fn commit_editing_actions() {
+        let mut s = AppState::new();
+        let id = open(&mut s, "/a");
+        let c = |id: &str, parents: &[&str]| Commit {
+            id: id.into(),
+            parents: parents.iter().map(|p| (*p).to_owned()).collect(),
+            subject: format!("s{id}"),
+            ..Default::default()
+        };
+        let history = vec![c("c", &["b"]), c("b", &["a"]), c("a", &[])];
+        apply_result(&mut s, id, JobResult::History(Ok(History::new(history))));
+        apply_result(
+            &mut s,
+            id,
+            JobResult::Status(Ok(RepoStatus {
+                branch: Some("main".into()),
+                head: Some("c".into()),
+                ..Default::default()
+            })),
+        );
+        let job = |s: &mut AppState, a| match &reduce(s, a)[..] {
+            [Effect::Spawn { job, .. }] => Some(job.clone()),
+            [] => None,
+            other => panic!("unexpected {other:?}"),
+        };
+        // Последний коммит — простой reset, старый — rebase без него.
+        assert_eq!(
+            job(&mut s, Action::Uncommit("c".into())),
+            Some(Job::Uncommit {
+                commit: "c".into(),
+                rebase: None
+            })
+        );
+        match job(&mut s, Action::Uncommit("b".into())) {
+            Some(Job::Uncommit {
+                rebase: Some((base, steps)),
+                ..
+            }) => {
+                assert_eq!(base.as_deref(), Some("a"));
+                assert_eq!(steps[0].action, RebaseAction::Drop);
+                assert_eq!(steps[1].action, RebaseAction::Pick);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // Без проиндексированного добавлять нечего.
+        assert_eq!(job(&mut s, Action::AmendInto("b".into())), None);
+        let r = s.active_repo_mut().unwrap();
+        r.status.as_mut().unwrap().changes.push(Change {
+            path: "f".into(),
+            orig_path: None,
+            staged: Some(ChangeKind::Modified),
+            unstaged: None,
+        });
+        assert!(matches!(
+            job(&mut s, Action::AmendInto("b".into())),
+            Some(Job::AmendInto { base: Some(b), steps, .. }) if b == "a" && steps.len() == 2
+        ));
+
+        // Сообщение: сначала загружается, затем reword через rebase.
+        assert_eq!(
+            job(&mut s, Action::EditMessage("b".into())),
+            Some(Job::CommitMessage("b".into()))
+        );
+        assert_eq!(job(&mut s, Action::SaveMessage), None);
+        apply_result(
+            &mut s,
+            id,
+            JobResult::CommitMessage {
+                commit: "b".into(),
+                result: Ok("sb".into()),
+            },
+        );
+        reduce(&mut s, Action::SetEditedMessage("Новое".into()));
+        match job(&mut s, Action::SaveMessage) {
+            Some(Job::InteractiveRebase { steps, .. }) => {
+                assert_eq!(steps[0].action, RebaseAction::Reword);
+                assert_eq!(steps[0].message.as_deref(), Some("Новое"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(s.active_repo().unwrap().message_editor.is_none());
     }
 }
