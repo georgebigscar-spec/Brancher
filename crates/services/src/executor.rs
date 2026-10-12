@@ -16,6 +16,7 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
                     return Err(e);
                 }
                 emit(JobResult::Refs(git.refs(repo, cancel).map_err(Into::into)));
+                emit(JobResult::Stashes(git.stashes(repo, cancel).map_err(Into::into)));
                 // Раскладка графа считается здесь, в worker-потоке, а не в кадре UI.
                 let history = git.log(repo, *history_limit, cancel).map(History::new);
                 emit(JobResult::History(history.map_err(Into::into)));
@@ -45,6 +46,9 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
                 let upstream = set_upstream.as_ref().map(|(r, b)| (r.as_str(), b.as_str()));
                 git.push(repo, upstream, cancel, &mut |p| emit(JobResult::Progress(p)))?
             }
+            Job::StashPush { message, untracked } => git.stash_push(repo, message, *untracked, cancel)?,
+            Job::StashApply { index, id, pop } => git.stash_apply(repo, *index, id, *pop, cancel)?,
+            Job::StashDrop { index, id } => git.stash_drop(repo, *index, id, cancel)?,
             Job::Diff(target) => {
                 let diff = git.diff(repo, target, cancel).map(|mut files| {
                     crate::highlight::highlight(&mut files);

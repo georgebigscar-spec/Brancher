@@ -120,6 +120,21 @@ impl Change {
     }
 }
 
+/// Запись `git stash list`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Stash {
+    /// Номер в `stash@{n}`: 0 — последний спрятанный.
+    pub index: usize,
+    /// Коммит stash: рабочее дерево на момент `git stash`.
+    pub id: Oid,
+    /// Коммит, поверх которого спрятаны изменения (первый родитель).
+    pub base: Option<Oid>,
+    /// Unix-время в секундах.
+    pub time: i64,
+    /// `On main: сообщение` или `WIP on main: abc1234 тема коммита`.
+    pub message: String,
+}
+
 /// Результат `git status`: текущая ветка и изменения.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RepoStatus {

@@ -14,7 +14,7 @@ pub use version::{GitVersion, MIN_GIT_VERSION};
 
 use std::path::Path;
 
-use brancher_core::{Commit, DiffTarget, FileDiff, GitRef, Progress, RepoStatus};
+use brancher_core::{Commit, DiffTarget, FileDiff, GitRef, Progress, RepoStatus, Stash};
 
 /// Высокоуровневые операции поверх [`Runner`].
 #[derive(Debug, Clone)]
@@ -150,6 +150,76 @@ impl Git {
         cancel: &CancelToken,
     ) -> Result<(), GitError> {
         self.run_args(repo, &commands::branch::delete_args(name, force), None, cancel)
+    }
+
+    pub fn stashes(&self, repo: &Path, cancel: &CancelToken) -> Result<Vec<Stash>, GitError> {
+        let args = commands::stash::list_args();
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self.runner.run(Some(repo), &args, None, cancel)?;
+        commands::stash::parse_list(&out.stdout)
+    }
+
+    pub fn stash_push(
+        &self,
+        repo: &Path,
+        message: &str,
+        untracked: bool,
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        self.run_args(
+            repo,
+            &commands::stash::push_args(message, untracked),
+            None,
+            cancel,
+        )
+    }
+
+    /// Применяет `stash@{index}` (и удаляет его при `pop`), если там всё ещё коммит `id`.
+    pub fn stash_apply(
+        &self,
+        repo: &Path,
+        index: usize,
+        id: &str,
+        pop: bool,
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        self.verify_stash(repo, index, id, cancel)?;
+        self.run_args(repo, &commands::stash::apply_args(index, pop), None, cancel)
+    }
+
+    pub fn stash_drop(
+        &self,
+        repo: &Path,
+        index: usize,
+        id: &str,
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        self.verify_stash(repo, index, id, cancel)?;
+        self.run_args(repo, &commands::stash::drop_args(index), None, cancel)
+    }
+
+    /// Номера stash сдвигаются, когда прячут или удаляют другие записи (в том числе из терминала):
+    /// действуем, только если под номером та самая запись.
+    fn verify_stash(
+        &self,
+        repo: &Path,
+        index: usize,
+        id: &str,
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        let args = commands::stash::verify_args(index);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self
+            .runner
+            .run_accepting(Some(repo), &args, None, cancel, &[0, 1])?;
+        if out.stdout_lossy().trim() == id {
+            Ok(())
+        } else {
+            Err(GitError::Stale(format!(
+                "{} уже другая запись: список stash изменился, проверьте его и повторите",
+                commands::stash::reference(index)
+            )))
+        }
     }
 
     pub fn fetch(

@@ -38,6 +38,8 @@ pub enum GitError {
     Cancelled,
     Parse(String),
     Unsupported(GitVersion),
+    /// Состояние репозитория изменилось с прошлого обновления: действие не выполнено.
+    Stale(String),
 }
 
 impl std::fmt::Display for GitError {
@@ -48,6 +50,7 @@ impl std::fmt::Display for GitError {
             Self::Failed { code: None, .. } => write!(f, "git завершён сигналом"),
             Self::Cancelled => f.write_str("операция отменена"),
             Self::Parse(m) => write!(f, "не удалось разобрать вывод git: {m}"),
+            Self::Stale(m) => f.write_str(m),
             Self::Unsupported(v) => write!(
                 f,
                 "git {v} не поддерживается, нужен {} или новее",

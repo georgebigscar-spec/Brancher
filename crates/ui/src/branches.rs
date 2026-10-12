@@ -1,4 +1,4 @@
-//! Ветки, remotes и теги слева, их контекстные меню и диалог новой ветки.
+//! Ветки, remotes, теги и stash слева, их контекстные меню и диалог новой ветки.
 //! Двойной клик по ветке — переключиться на неё.
 
 use brancher_core::{branch_name_error, Action, Commit, GitRef, RefKind, RepoState};
@@ -45,6 +45,7 @@ pub fn refs(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
             }
             ui.add_space(8.0);
         }
+        crate::stash::section(ui, repo, actions);
     });
 }
 
