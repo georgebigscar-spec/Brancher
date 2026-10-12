@@ -295,6 +295,10 @@ pub enum Action {
     },
     ShowFileHistory(String),
     CloseFileView,
+    /// Строка поиска по истории: текст заголовка, автор или начало SHA.
+    SetHistoryQuery(String),
+    /// Показывать только коммиты, достижимые из HEAD.
+    SetHeadOnly(bool),
     /// Слить ветку, тег или remote-ветку в текущую.
     Merge(String),
     /// Перебазировать текущую ветку на ссылку (спрашивает подтверждение).
@@ -439,6 +443,15 @@ impl FileView {
     }
 }
 
+/// Совпадает ли коммит с одним словом поиска (уже в нижнем регистре):
+/// заголовок или автор содержат его, либо SHA с него начинается.
+fn commit_matches(c: &Commit, token: &str) -> bool {
+    let sha = token.len() >= 4 && token.bytes().all(|b| b.is_ascii_hexdigit()) && c.id.starts_with(token);
+    sha || c.subject.to_lowercase().contains(token)
+        || c.author.name.to_lowercase().contains(token)
+        || c.author.email.to_lowercase().contains(token)
+}
+
 /// Сколько коммитов показывать в истории файла.
 pub const FILE_HISTORY_LIMIT: usize = 2_000;
 
@@ -462,6 +475,11 @@ pub struct RepoState {
     pub diff_selection: BTreeSet<(usize, usize, usize)>,
     /// Строка последнего клика — начало диапазона для Shift+клик.
     pub diff_anchor: Option<(usize, usize, usize)>,
+    /// Поиск по истории и фильтр «только текущая ветка».
+    pub history_query: String,
+    pub head_only: bool,
+    /// Номера коммитов `history`, прошедших фильтр; `None` — фильтра нет, видна вся история.
+    pub history_filter: Option<Vec<usize>>,
     /// Blame или история файла; пока открыт, diff закрыт.
     pub file_view: Option<FileView>,
     /// Необратимое действие, которое ждёт подтверждения в диалоге.
@@ -501,6 +519,54 @@ impl RepoState {
     fn clear_selection(&mut self) {
         self.diff_selection.clear();
         self.diff_anchor = None;
+    }
+
+    /// Пересчитывает `history_filter` по строке поиска и флагу `head_only`.
+    fn refilter(&mut self) {
+        let tokens: Vec<String> = self
+            .history_query
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        if tokens.is_empty() && !self.head_only {
+            self.history_filter = None;
+            return;
+        }
+        let reachable = self.head_only.then(|| self.reachable_from_head());
+        let filter = self
+            .history
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| reachable.as_ref().is_none_or(|r| r[*i]))
+            .filter(|(_, c)| tokens.iter().all(|t| commit_matches(c, t)))
+            .map(|(i, _)| i)
+            .collect();
+        self.history_filter = Some(filter);
+    }
+
+    /// Какие коммиты загруженной истории достижимы из HEAD (по родителям).
+    fn reachable_from_head(&self) -> Vec<bool> {
+        let index: std::collections::HashMap<&str, usize> = self
+            .history
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.id.as_str(), i))
+            .collect();
+        let mut seen = vec![false; self.history.len()];
+        let head = self.status.as_ref().and_then(|s| s.head.as_deref());
+        let mut stack: Vec<usize> = head.and_then(|h| index.get(h)).copied().into_iter().collect();
+        while let Some(i) = stack.pop() {
+            if std::mem::replace(&mut seen[i], true) {
+                continue;
+            }
+            stack.extend(
+                self.history[i]
+                    .parents
+                    .iter()
+                    .filter_map(|p| index.get(p.as_str())),
+            );
+        }
+        seen
     }
 
     /// Идущая операция git (merge, rebase…), если есть.
@@ -1124,6 +1190,16 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     repo.file_view = None;
                     vec![]
                 }
+                Action::SetHistoryQuery(query) => {
+                    repo.history_query = query;
+                    repo.refilter();
+                    vec![]
+                }
+                Action::SetHeadOnly(on) => {
+                    repo.head_only = on;
+                    repo.refilter();
+                    vec![]
+                }
                 Action::Merge(_) | Action::Rebase(_) if repo.operation().is_some() => {
                     let op = repo.operation().map_or("", Operation::name);
                     state.notifications.push(Notification {
@@ -1301,7 +1377,13 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
     let mut error = None;
     let mut effects = vec![];
     match result {
-        JobResult::Status(Ok(s)) => r.status = Some(s),
+        JobResult::Status(Ok(s)) => {
+            let head_moved = r.status.as_ref().map(|o| &o.head) != Some(&s.head);
+            r.status = Some(s);
+            if head_moved && r.head_only {
+                r.refilter();
+            }
+        }
         JobResult::Refs(Ok(refs)) => r.refs = refs,
         JobResult::Stashes(Ok(stashes)) => {
             // Удалённая или сдвинутая запись: её diff больше не тот.
@@ -1315,6 +1397,7 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
         JobResult::History(Ok(h)) => {
             r.history = h.commits;
             r.graph = h.graph;
+            r.refilter();
         }
         JobResult::Diff { target, result } => {
             // Результат для уже закрытой или сменённой цели не нужен.
@@ -2567,5 +2650,64 @@ mod tests {
         blame(&mut s, None);
         reduce(&mut s, Action::SelectCommit(Some("c1".into())));
         assert!(s.active_repo().unwrap().file_view.is_none());
+    }
+
+    #[test]
+    fn history_search_and_head_only() {
+        let mut s = AppState::new();
+        let id = open(&mut s, "/a");
+        let commit = |id: &str, parents: &[&str], subject: &str, author: &str| Commit {
+            id: id.into(),
+            parents: parents.iter().map(|p| (*p).into()).collect(),
+            author: Signature {
+                name: author.into(),
+                email: format!("{}@x.org", author.to_lowercase()),
+                time: 0,
+            },
+            subject: subject.into(),
+            ..Default::default()
+        };
+        // d — на другой ветке: main = c → b → a, dev = d → a.
+        let history = vec![
+            commit("dddd1111", &["aaaa1111"], "Фича поиска", "Bob"),
+            commit("cccc1111", &["bbbb1111"], "Исправить поиск", "Анна"),
+            commit("bbbb1111", &["aaaa1111"], "Docs", "Bob"),
+            commit("aaaa1111", &[], "Init", "Анна"),
+        ];
+        apply_result(&mut s, id, JobResult::History(Ok(History::new(history))));
+        let status = RepoStatus {
+            head: Some("cccc1111".into()),
+            ..Default::default()
+        };
+        apply_result(&mut s, id, JobResult::Status(Ok(status)));
+        let filter = |s: &mut AppState, a| {
+            reduce(s, a);
+            s.active_repo().unwrap().history_filter.clone()
+        };
+        assert_eq!(
+            filter(&mut s, Action::SetHistoryQuery("ПОИСК".into())),
+            Some(vec![0, 1])
+        );
+        assert_eq!(
+            filter(&mut s, Action::SetHistoryQuery("поиск анна".into())),
+            Some(vec![1])
+        );
+        assert_eq!(
+            filter(&mut s, Action::SetHistoryQuery("bbbb".into())),
+            Some(vec![2])
+        );
+        assert_eq!(
+            filter(&mut s, Action::SetHistoryQuery("bob@x".into())),
+            Some(vec![0, 2])
+        );
+        assert_eq!(filter(&mut s, Action::SetHistoryQuery(" ".into())), None);
+        assert_eq!(filter(&mut s, Action::SetHeadOnly(true)), Some(vec![1, 2, 3]));
+        assert_eq!(
+            filter(&mut s, Action::SetHistoryQuery("поиск".into())),
+            Some(vec![1])
+        );
+        // Новая история — фильтр пересчитывается.
+        apply_result(&mut s, id, JobResult::History(Ok(History::default())));
+        assert_eq!(s.active_repo().unwrap().history_filter, Some(vec![]));
     }
 }
