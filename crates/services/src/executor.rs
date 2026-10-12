@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use brancher_core::{History, Job, JobError, JobResult};
+use brancher_core::{Diff, History, Job, JobError, JobResult};
 use brancher_git::{CancelToken, Git};
 
 /// Выполняет задачу и отдаёт результаты по мере готовности через `emit`.
@@ -26,6 +26,13 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
                 git.unstage(repo, paths, has_head, cancel)?
             }
             Job::Commit { message, amend } => git.commit(repo, message, *amend, cancel)?,
+            Job::Diff(target) => {
+                let diff = git.diff(repo, target, cancel).map(Diff::new);
+                emit(JobResult::Diff {
+                    target: target.clone(),
+                    result: diff.map_err(Into::into),
+                });
+            }
         }
         Ok(())
     })();

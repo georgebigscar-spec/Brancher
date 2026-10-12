@@ -1,7 +1,7 @@
 //! Вкладка репозитория: ветки слева, история в центре, изменения и коммит справа.
 //! Граф коммитов рисует [`crate::graph`]; diff и blame — следующие шаги MVP.
 
-use brancher_core::{Action, Change, Commit, RefKind, RepoState};
+use brancher_core::{Action, Change, Commit, DiffTarget, RefKind, RepoState};
 use egui::{RichText, Ui};
 
 const ROW_HEIGHT: f32 = 24.0;
@@ -21,7 +21,18 @@ pub fn show(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
         let center = (ui.available_width() - side - 16.0).max(200.0);
         ui.vertical(|ui| {
             ui.set_width(center);
-            history(ui, repo, actions);
+            if repo.diff_target.is_some() {
+                // История сверху, diff снизу.
+                let history_height = (height * 0.4).max(120.0);
+                ui.allocate_ui(egui::vec2(center, history_height), |ui| {
+                    ui.set_min_height(history_height);
+                    history(ui, repo, actions);
+                });
+                ui.separator();
+                crate::diff_view::show(ui, repo, actions);
+            } else {
+                history(ui, repo, actions);
+            }
         });
         ui.separator();
         ui.vertical(|ui| {
@@ -166,7 +177,7 @@ fn changes(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
             actions.push(Action::StageAll);
         }
     });
-    file_list(ui, "unstaged", &unstaged, false, actions);
+    file_list(ui, repo, "unstaged", &unstaged, false, actions);
 
     ui.add_space(8.0);
     ui.horizontal(|ui| {
@@ -175,7 +186,7 @@ fn changes(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
             actions.push(Action::UnstageAll);
         }
     });
-    file_list(ui, "staged", &staged, true, actions);
+    file_list(ui, repo, "staged", &staged, true, actions);
 
     ui.add_space(8.0);
     let mut message = repo.commit_message.clone();
@@ -211,7 +222,15 @@ fn changes(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
     });
 }
 
-fn file_list(ui: &mut Ui, id: &str, files: &[&Change], staged: bool, actions: &mut Vec<Action>) {
+fn file_list(
+    ui: &mut Ui,
+    repo: &RepoState,
+    id: &str,
+    files: &[&Change],
+    staged: bool,
+    actions: &mut Vec<Action>,
+) {
+    let theme = widgets::Theme::get(ui.ctx());
     egui::ScrollArea::vertical()
         .id_salt(id)
         .max_height(180.0)
@@ -219,7 +238,13 @@ fn file_list(ui: &mut Ui, id: &str, files: &[&Change], staged: bool, actions: &m
             for c in files {
                 let kind = if staged { c.staged } else { c.unstaged };
                 let letter = kind.map(|k| k.letter()).unwrap_or(' ');
-                ui.horizontal(|ui| {
+                let selected = matches!(
+                    &repo.diff_target,
+                    Some(DiffTarget::Change { path, staged: s, .. }) if path == &c.path && *s == staged
+                );
+                // Фон рисуется под строкой, поэтому место под него резервируется заранее.
+                let background = ui.painter().add(egui::Shape::Noop);
+                let row = ui.horizontal(|ui| {
                     ui.monospace(letter.to_string());
                     let r = ui.add(egui::Label::new(&c.path).truncate().sense(egui::Sense::click()));
                     if r.double_clicked() {
@@ -230,12 +255,25 @@ fn file_list(ui: &mut Ui, id: &str, files: &[&Change], staged: bool, actions: &m
                             Action::Stage(paths)
                         });
                     }
+                    if r.clicked() {
+                        actions.push(Action::SelectChange {
+                            path: c.path.clone(),
+                            staged,
+                        });
+                    }
                     r.on_hover_text(if staged {
-                        "Двойной клик — unstage"
+                        "Клик — diff, двойной клик — unstage"
                     } else {
-                        "Двойной клик — stage"
+                        "Клик — diff, двойной клик — stage"
                     });
                 });
+                if selected {
+                    let rect = row.response.rect.expand2(egui::vec2(4.0, 0.0));
+                    ui.painter().set(
+                        background,
+                        egui::Shape::rect_filled(rect, theme.radius_sm(), theme.accent),
+                    );
+                }
             }
         });
 }

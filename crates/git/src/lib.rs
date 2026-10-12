@@ -14,7 +14,7 @@ pub use version::{GitVersion, MIN_GIT_VERSION};
 
 use std::path::Path;
 
-use brancher_core::{Commit, GitRef, RepoStatus};
+use brancher_core::{Commit, DiffTarget, FileDiff, GitRef, RepoStatus};
 
 /// Высокоуровневые операции поверх [`Runner`].
 #[derive(Debug, Clone)]
@@ -59,6 +59,19 @@ impl Git {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = self.runner.run(Some(repo), &args, None, cancel)?;
         commands::log::parse(&out.stdout)
+    }
+
+    pub fn diff(
+        &self,
+        repo: &Path,
+        target: &DiffTarget,
+        cancel: &CancelToken,
+    ) -> Result<Vec<FileDiff>, GitError> {
+        let args = commands::diff::args(target);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let ok = commands::diff::ok_codes(target);
+        let out = self.runner.run_accepting(Some(repo), &args, None, cancel, ok)?;
+        commands::diff::parse(&out.stdout)
     }
 
     pub fn stage(&self, repo: &Path, paths: &[String], cancel: &CancelToken) -> Result<(), GitError> {

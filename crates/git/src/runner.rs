@@ -133,6 +133,19 @@ impl Runner {
         stdin: Option<&[u8]>,
         cancel: &CancelToken,
     ) -> Result<Output, GitError> {
+        self.run_accepting(cwd, args, stdin, cancel, &[0])
+    }
+
+    /// Как [`Runner::run`], но успехом считаются и другие коды выхода
+    /// (например, 1 у `git diff --no-index`, когда файлы различаются).
+    pub fn run_accepting(
+        &self,
+        cwd: Option<&Path>,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+        cancel: &CancelToken,
+        ok_codes: &[i32],
+    ) -> Result<Output, GitError> {
         if cancel.is_cancelled() {
             return Err(GitError::Cancelled);
         }
@@ -202,7 +215,7 @@ impl Runner {
         let stdout = out_reader.join().unwrap_or_default();
         let stderr = String::from_utf8_lossy(&err_reader.join().unwrap_or_default()).into_owned();
 
-        if status.success() {
+        if status.code().is_some_and(|c| ok_codes.contains(&c)) {
             Ok(Output { stdout, stderr })
         } else {
             Err(GitError::Failed {
