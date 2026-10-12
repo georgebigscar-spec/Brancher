@@ -9,6 +9,7 @@ pub mod diff;
 pub mod log;
 pub mod merge;
 pub mod progress;
+pub mod rebase;
 pub mod refs;
 pub mod remote;
 pub mod stage;

@@ -188,6 +188,55 @@ impl Operation {
     }
 }
 
+/// Что сделать с коммитом при interactive rebase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebaseAction {
+    Pick,
+    /// Оставить изменения, заменить сообщение.
+    Reword,
+    /// Слить с предыдущим коммитом, сообщения объединить.
+    Squash,
+    /// Слить с предыдущим коммитом, своё сообщение выбросить.
+    Fixup,
+    Drop,
+}
+
+impl RebaseAction {
+    pub const ALL: [Self; 5] = [Self::Pick, Self::Reword, Self::Squash, Self::Fixup, Self::Drop];
+
+    /// Команда в todo-списке git.
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::Pick | Self::Reword => "pick",
+            Self::Squash => "squash",
+            Self::Fixup => "fixup",
+            Self::Drop => "drop",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Reword => "reword",
+            other => other.command(),
+        }
+    }
+
+    /// Сливается с предыдущим коммитом.
+    pub fn melds(self) -> bool {
+        matches!(self, Self::Squash | Self::Fixup)
+    }
+}
+
+/// Шаг interactive rebase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebaseStep {
+    pub action: RebaseAction,
+    pub commit: Oid,
+    pub subject: String,
+    /// Новое сообщение для `Reword`; `None`, пока полное сообщение не загружено.
+    pub message: Option<String>,
+}
+
 /// Результат `git status`: текущая ветка и изменения.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RepoStatus {

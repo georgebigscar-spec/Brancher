@@ -82,6 +82,13 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
             Job::Revert { commit, mainline } => git.revert(repo, commit, *mainline, cancel)?,
             Job::Merge(target) => git.merge(repo, target, cancel)?,
             Job::Rebase(onto) => git.rebase(repo, onto, cancel)?,
+            Job::InteractiveRebase { base, steps } => {
+                git.interactive_rebase(repo, base.as_deref(), steps, cancel)?
+            }
+            Job::CommitMessage(commit) => emit(JobResult::CommitMessage {
+                commit: commit.clone(),
+                result: git.commit_message(repo, commit, cancel).map_err(Into::into),
+            }),
             Job::Continue(op) => git.continue_operation(repo, *op, cancel)?,
             Job::Abort(op) => git.abort_operation(repo, *op, cancel)?,
             Job::ResolveConflict { path, ours } => git.resolve_with(repo, path, *ours, cancel)?,

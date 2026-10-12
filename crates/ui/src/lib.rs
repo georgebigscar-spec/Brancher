@@ -5,6 +5,7 @@ mod branches;
 mod diff_view;
 mod file_view;
 mod graph;
+mod rebase_plan;
 mod remotes;
 mod repo_view;
 mod stash;

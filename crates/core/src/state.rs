@@ -116,6 +116,13 @@ pub enum Job {
     Merge(String),
     /// Перебазировать текущую ветку на ссылку.
     Rebase(String),
+    /// Interactive rebase по плану; `base` — `None` для rebase с корня истории.
+    InteractiveRebase {
+        base: Option<Oid>,
+        steps: Vec<RebaseStep>,
+    },
+    /// Полное сообщение коммита (для reword).
+    CommitMessage(Oid),
     Continue(Operation),
     Abort(Operation),
     /// Разрешить конфликт версией одной из сторон и отметить файл решённым.
@@ -135,7 +142,7 @@ impl Job {
     pub fn is_read(&self) -> bool {
         matches!(
             self,
-            Job::Refresh { .. } | Job::Diff(_) | Job::Blame { .. } | Job::FileLog(_)
+            Job::Refresh { .. } | Job::Diff(_) | Job::Blame { .. } | Job::FileLog(_) | Job::CommitMessage(_)
         )
     }
 
@@ -171,6 +178,8 @@ impl Job {
             Job::Revert { .. } => "revert",
             Job::Merge(_) => "merge",
             Job::Rebase(_) => "rebase",
+            Job::InteractiveRebase { .. } => "rebase -i",
+            Job::CommitMessage(_) => "message",
             Job::Continue(op) => match op {
                 Operation::Merge => "merge --continue",
                 Operation::Rebase => "rebase --continue",
@@ -229,6 +238,10 @@ pub enum JobResult {
     FileLog {
         path: String,
         result: Result<Vec<Commit>, JobError>,
+    },
+    CommitMessage {
+        commit: Oid,
+        result: Result<String, JobError>,
     },
     /// Файлы репозитория изменились снаружи (редактор, терминал) — нужно обновиться.
     FilesChanged,
@@ -373,6 +386,23 @@ pub enum Action {
     Merge(String),
     /// Перебазировать текущую ветку на ссылку (спрашивает подтверждение).
     Rebase(String),
+    /// Открыть план interactive rebase текущей ветки, начиная с этого коммита.
+    PlanRebase(Oid),
+    SetRebaseAction {
+        index: usize,
+        action: RebaseAction,
+    },
+    /// Сдвинуть шаг плана на одну позицию вверх (раньше) или вниз.
+    MoveRebaseStep {
+        index: usize,
+        up: bool,
+    },
+    SetRebaseMessage {
+        index: usize,
+        message: String,
+    },
+    CancelRebasePlan,
+    RunRebasePlan,
     /// Продолжить merge или rebase после разрешения конфликтов.
     ContinueOperation,
     /// Прервать merge или rebase (спрашивает подтверждение).
@@ -522,6 +552,39 @@ fn commit_matches(c: &Commit, token: &str) -> bool {
         || c.author.email.to_lowercase().contains(token)
 }
 
+/// План interactive rebase, который редактируется в диалоге.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebasePlan {
+    /// Родитель первого коммита; `None` — rebase с корня истории.
+    pub base: Option<Oid>,
+    pub branch: String,
+    /// Шаги в порядке применения: сверху самый старый коммит.
+    pub steps: Vec<RebaseStep>,
+}
+
+impl RebasePlan {
+    /// Почему план нельзя выполнить, или `None`.
+    pub fn error(&self) -> Option<&'static str> {
+        let mut kept = self.steps.iter().filter(|s| s.action != RebaseAction::Drop);
+        match kept.next() {
+            None => return Some("Все коммиты удалены: оставьте хотя бы один"),
+            Some(s) if s.action.melds() => {
+                return Some("Первый оставшийся коммит не может быть squash или fixup: его не с чем слить")
+            }
+            _ => {}
+        }
+        let reword = self.steps.iter().filter(|s| s.action == RebaseAction::Reword);
+        for s in reword {
+            match &s.message {
+                None => return Some("Сообщение для reword ещё загружается"),
+                Some(m) if m.trim().is_empty() => return Some("Сообщение для reword пустое"),
+                _ => {}
+            }
+        }
+        None
+    }
+}
+
 /// Сколько коммитов показывать в истории файла.
 pub const FILE_HISTORY_LIMIT: usize = 2_000;
 
@@ -551,6 +614,8 @@ pub struct RepoState {
     pub head_only: bool,
     /// Номера коммитов `history`, прошедших фильтр; `None` — фильтра нет, видна вся история.
     pub history_filter: Option<Vec<usize>>,
+    /// Открытый диалог interactive rebase.
+    pub rebase_plan: Option<RebasePlan>,
     /// Blame или история файла; пока открыт, diff закрыт.
     pub file_view: Option<FileView>,
     /// Необратимое действие, которое ждёт подтверждения в диалоге.
@@ -638,6 +703,54 @@ impl RepoState {
             );
         }
         seen
+    }
+
+    /// План interactive rebase от коммита `from` до HEAD по первым родителям.
+    fn plan_rebase(&self, from: &str) -> Result<RebasePlan, String> {
+        let status = self.status.as_ref().ok_or("Статус ещё не загружен")?;
+        let branch = status
+            .branch
+            .clone()
+            .ok_or("HEAD не на ветке (detached): interactive rebase недоступен")?;
+        if status
+            .changes
+            .iter()
+            .any(|c| c.unstaged != Some(ChangeKind::Untracked))
+        {
+            return Err("В рабочей копии есть изменения: закоммитьте или спрячьте их (Stash)".into());
+        }
+        let by_id: std::collections::HashMap<&str, &Commit> =
+            self.history.iter().map(|c| (c.id.as_str(), c)).collect();
+        let mut chain = vec![];
+        let mut cur = status.head.as_deref();
+        loop {
+            let Some(c) = cur.and_then(|id| by_id.get(id)) else {
+                return Err("Коммит не входит в текущую ветку (или старше загруженной истории)".into());
+            };
+            if c.is_merge() {
+                return Err(format!(
+                    "Среди коммитов есть слияние {}: interactive rebase через слияния не поддерживается",
+                    c.short_id()
+                ));
+            }
+            chain.push(*c);
+            if c.id == from {
+                break;
+            }
+            cur = c.parents.first().map(String::as_str);
+        }
+        let base = chain.last().and_then(|c| c.parents.first().cloned());
+        let steps = chain
+            .iter()
+            .rev()
+            .map(|c| RebaseStep {
+                action: RebaseAction::Pick,
+                commit: c.id.clone(),
+                subject: c.subject.clone(),
+                message: None,
+            })
+            .collect();
+        Ok(RebasePlan { base, branch, steps })
     }
 
     /// Идущая операция git (merge, rebase…), если есть.
@@ -1421,7 +1534,11 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                         vec![]
                     }
                 },
-                Action::Merge(_) | Action::Rebase(_) | Action::CherryPick(_) | Action::Revert(_)
+                Action::Merge(_)
+                | Action::Rebase(_)
+                | Action::CherryPick(_)
+                | Action::Revert(_)
+                | Action::PlanRebase(_)
                     if repo.operation().is_some() =>
                 {
                     let op = repo.operation().map_or("", Operation::name);
@@ -1462,6 +1579,65 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                         }),
                     }
                     vec![]
+                }
+                Action::PlanRebase(from) => {
+                    match repo.plan_rebase(&from) {
+                        Ok(plan) => repo.rebase_plan = Some(plan),
+                        Err(details) => state.notifications.push(Notification {
+                            severity: Severity::Info,
+                            title: "Interactive rebase недоступен".into(),
+                            details,
+                        }),
+                    }
+                    vec![]
+                }
+                Action::SetRebaseAction { index, action } => {
+                    let Some(step) = repo.rebase_plan.as_mut().and_then(|p| p.steps.get_mut(index)) else {
+                        return vec![];
+                    };
+                    step.action = action;
+                    if action == RebaseAction::Reword && step.message.is_none() {
+                        spawn(Job::CommitMessage(step.commit.clone()))
+                    } else {
+                        vec![]
+                    }
+                }
+                Action::MoveRebaseStep { index, up } => {
+                    if let Some(plan) = repo.rebase_plan.as_mut() {
+                        let other = if up { index.checked_sub(1) } else { Some(index + 1) };
+                        if let Some(j) = other.filter(|&j| j < plan.steps.len() && index < plan.steps.len()) {
+                            plan.steps.swap(index, j);
+                        }
+                    }
+                    vec![]
+                }
+                Action::SetRebaseMessage { index, message } => {
+                    if let Some(step) = repo.rebase_plan.as_mut().and_then(|p| p.steps.get_mut(index)) {
+                        step.message = Some(message);
+                    }
+                    vec![]
+                }
+                Action::CancelRebasePlan => {
+                    repo.rebase_plan = None;
+                    vec![]
+                }
+                Action::RunRebasePlan => {
+                    let Some(plan) = repo.rebase_plan.as_ref() else {
+                        return vec![];
+                    };
+                    if let Some(e) = plan.error() {
+                        state.notifications.push(Notification {
+                            severity: Severity::Info,
+                            title: "Interactive rebase не запущен".into(),
+                            details: e.into(),
+                        });
+                        return vec![];
+                    }
+                    let plan = repo.rebase_plan.take().expect("план есть");
+                    spawn(Job::InteractiveRebase {
+                        base: plan.base,
+                        steps: plan.steps,
+                    })
                 }
                 Action::ContinueOperation => match repo.operation() {
                     Some(op) => {
@@ -1684,6 +1860,15 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
                 }
             }
         }
+        JobResult::CommitMessage { commit, result } => match result {
+            Ok(m) => {
+                let steps = r.rebase_plan.iter_mut().flat_map(|p| p.steps.iter_mut());
+                for s in steps.filter(|s| s.commit == commit && s.message.is_none()) {
+                    s.message = Some(m.clone());
+                }
+            }
+            Err(e) => error = Some(("Не удалось прочитать сообщение коммита".to_owned(), e)),
+        },
         JobResult::Status(Err(e))
         | JobResult::Refs(Err(e))
         | JobResult::Stashes(Err(e))
@@ -1718,7 +1903,7 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
                     }
                     if job == "refresh" {
                         effects.extend(refresh_change_diff(r));
-                    } else if !matches!(job, "diff" | "blame" | "log") {
+                    } else if !matches!(job, "diff" | "blame" | "log" | "message") {
                         effects.push(Effect::Spawn {
                             repo,
                             job: Job::Refresh { history_limit: limit },
@@ -3090,5 +3275,114 @@ mod tests {
                 set_upstream: Some(("up".into(), "main".into()))
             }
         );
+    }
+
+    #[test]
+    fn interactive_rebase_plan() {
+        let mut s = AppState::new();
+        let id = open(&mut s, "/a");
+        let c = |id: &str, parents: &[&str]| Commit {
+            id: id.into(),
+            parents: parents.iter().map(|p| (*p).to_owned()).collect(),
+            subject: format!("s{id}"),
+            ..Default::default()
+        };
+        // d → c → b → a (корень); m — слияние в другой ветке.
+        let history = vec![
+            c("d", &["c"]),
+            c("m", &["b", "x"]),
+            c("c", &["b"]),
+            c("b", &["a"]),
+            c("a", &[]),
+        ];
+        apply_result(&mut s, id, JobResult::History(Ok(History::new(history))));
+        apply_result(
+            &mut s,
+            id,
+            JobResult::Status(Ok(RepoStatus {
+                branch: Some("main".into()),
+                head: Some("d".into()),
+                ..Default::default()
+            })),
+        );
+        let plan = |s: &AppState| s.active_repo().unwrap().rebase_plan.clone();
+        assert!(reduce(&mut s, Action::PlanRebase("c".into())).is_empty());
+        let p = plan(&s).unwrap();
+        assert_eq!(p.base.as_deref(), Some("b"));
+        let ids: Vec<_> = p.steps.iter().map(|s| s.commit.as_str()).collect();
+        assert_eq!(ids, ["c", "d"]);
+
+        // Корень — rebase с `--root`; коммит вне ветки — отказ.
+        reduce(&mut s, Action::PlanRebase("a".into()));
+        assert_eq!(plan(&s).unwrap().base, None);
+        assert_eq!(plan(&s).unwrap().steps.len(), 4);
+        reduce(&mut s, Action::CancelRebasePlan);
+        reduce(&mut s, Action::PlanRebase("m".into()));
+        assert!(plan(&s).is_none());
+        assert_eq!(s.notifications.len(), 1);
+
+        reduce(&mut s, Action::PlanRebase("b".into()));
+        // b, c, d: squash первым быть не может.
+        let set = |s: &mut AppState, index, action| reduce(s, Action::SetRebaseAction { index, action });
+        set(&mut s, 0, RebaseAction::Fixup);
+        assert!(plan(&s).unwrap().error().is_some());
+        assert!(reduce(&mut s, Action::RunRebasePlan).is_empty());
+        assert!(plan(&s).is_some());
+        reduce(&mut s, Action::MoveRebaseStep { index: 0, up: false });
+        assert_eq!(plan(&s).unwrap().steps[0].commit, "c");
+        assert_eq!(plan(&s).unwrap().error(), None);
+        reduce(&mut s, Action::MoveRebaseStep { index: 0, up: true });
+        reduce(&mut s, Action::MoveRebaseStep { index: 1, up: true });
+        assert_eq!(plan(&s).unwrap().steps[0].commit, "b");
+
+        // Reword подгружает полное сообщение, пока его нет — запускать нельзя.
+        set(&mut s, 0, RebaseAction::Pick);
+        let fx = set(&mut s, 2, RebaseAction::Reword);
+        assert_eq!(
+            fx,
+            [Effect::Spawn {
+                repo: id,
+                job: Job::CommitMessage("d".into())
+            }]
+        );
+        assert!(plan(&s).unwrap().error().is_some());
+        apply_result(
+            &mut s,
+            id,
+            JobResult::CommitMessage {
+                commit: "d".into(),
+                result: Ok("sd\n\nтело".into()),
+            },
+        );
+        assert_eq!(plan(&s).unwrap().steps[2].message.as_deref(), Some("sd\n\nтело"));
+        reduce(
+            &mut s,
+            Action::SetRebaseMessage {
+                index: 2,
+                message: "новое".into(),
+            },
+        );
+        match &reduce(&mut s, Action::RunRebasePlan)[..] {
+            [Effect::Spawn {
+                job: Job::InteractiveRebase { base, steps },
+                ..
+            }] => {
+                assert_eq!(base.as_deref(), Some("a"));
+                assert_eq!(steps[2].message.as_deref(), Some("новое"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(plan(&s).is_none());
+
+        // С изменениями в рабочей копии план не открывается.
+        let r = s.active_repo_mut().unwrap();
+        r.status.as_mut().unwrap().changes.push(Change {
+            path: "f".into(),
+            orig_path: None,
+            staged: None,
+            unstaged: Some(ChangeKind::Modified),
+        });
+        reduce(&mut s, Action::PlanRebase("c".into()));
+        assert!(plan(&s).is_none());
     }
 }

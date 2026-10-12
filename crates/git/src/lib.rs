@@ -15,7 +15,8 @@ pub use version::{GitVersion, MIN_GIT_VERSION};
 use std::path::{Path, PathBuf};
 
 use brancher_core::{
-    Blame, Commit, DiffTarget, FileDiff, GitRef, Operation, Progress, Remote, RepoStatus, Stash,
+    Blame, Commit, DiffTarget, FileDiff, GitRef, Operation, Progress, RebaseAction, RebaseStep, Remote,
+    RepoStatus, Stash,
 };
 
 /// Высокоуровневые операции поверх [`Runner`].
@@ -66,6 +67,48 @@ impl Git {
 
     pub fn rebase(&self, repo: &Path, onto: &str, cancel: &CancelToken) -> Result<(), GitError> {
         self.start_operation(repo, &commands::merge::rebase_args(onto), cancel)
+    }
+
+    /// Interactive rebase по готовому плану; `base` — `None` для rebase с корня истории.
+    /// Остановка на конфликте — не ошибка, как у обычного rebase.
+    pub fn interactive_rebase(
+        &self,
+        repo: &Path,
+        base: Option<&str>,
+        steps: &[RebaseStep],
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        use commands::rebase::{REWORD_DIR, TODO_FILE};
+        let git_dir = self.git_dir(repo, cancel)?;
+        let io = |e: std::io::Error| GitError::Parse(format!("не удалось записать план rebase: {e}"));
+        let reword = git_dir.join(REWORD_DIR);
+        let _ = std::fs::remove_dir_all(&reword);
+        std::fs::create_dir_all(&reword).map_err(io)?;
+        for (i, s) in steps.iter().enumerate() {
+            if let (RebaseAction::Reword, Some(m)) = (s.action, &s.message) {
+                std::fs::write(reword.join(i.to_string()), m).map_err(io)?;
+            }
+        }
+        std::fs::write(git_dir.join(TODO_FILE), commands::rebase::todo(steps)).map_err(io)?;
+        let mut git = self.clone();
+        git.runner.env.push((
+            "GIT_SEQUENCE_EDITOR".into(),
+            commands::rebase::sequence_editor().into(),
+        ));
+        git.start_operation(repo, &commands::rebase::start_args(base), cancel)
+    }
+
+    /// Полное сообщение коммита (для reword).
+    pub fn commit_message(
+        &self,
+        repo: &Path,
+        commit: &str,
+        cancel: &CancelToken,
+    ) -> Result<String, GitError> {
+        let args = commands::rebase::message_args(commit);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self.runner.run(Some(repo), &args, None, cancel)?;
+        Ok(out.stdout_lossy().trim_end().to_owned())
     }
 
     /// `--continue`; новые конфликты на следующем шаге rebase — тоже не ошибка.
