@@ -7,6 +7,7 @@ mod file_view;
 mod graph;
 mod repo_view;
 mod stash;
+mod tags;
 mod welcome;
 
 use brancher_core::{Action, AppState, Severity};

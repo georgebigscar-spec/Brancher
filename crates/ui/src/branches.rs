@@ -99,16 +99,40 @@ fn ref_row(ui: &mut Ui, r: &GitRef, current: Option<&str>, actions: &mut Vec<Act
                 actions.push(Action::DeleteBranch(r.name.clone()));
             }
         }
+        if r.kind == RefKind::Tag {
+            widgets::menu_separator(ui);
+            if widgets::menu_item(ui, "Отправить в remote", None).clicked() {
+                actions.push(Action::PushTag(r.name.clone()));
+            }
+            if widgets::menu_item(ui, "Удалить тег…", None).clicked() {
+                actions.push(Action::DeleteTag(r.name.clone()));
+            }
+        }
     });
 }
 
-/// Контекстное меню строки истории.
-pub fn commit_menu(response: &egui::Response, c: &Commit) {
-    widgets::context_menu(response, 220.0, |ui| {
+/// Контекстное меню строки истории; `current` — текущая ветка (для cherry-pick).
+pub fn commit_menu(response: &egui::Response, c: &Commit, current: Option<&str>, actions: &mut Vec<Action>) {
+    widgets::context_menu(response, 240.0, |ui| {
+        let short: String = c.id.chars().take(10).collect();
         if widgets::menu_item(ui, "Создать ветку…", None).clicked() {
-            let short: String = c.id.chars().take(10).collect();
             open_new_branch(ui.ctx(), c.id.clone(), format!("{short} {}", c.subject));
         }
+        if widgets::menu_item(ui, "Создать тег…", None).clicked() {
+            crate::tags::open_new_tag(ui.ctx(), c.id.clone(), format!("{short} {}", c.subject));
+        }
+        widgets::menu_separator(ui);
+        let pick = match current {
+            Some(b) => format!("Cherry-pick в {b}"),
+            None => "Cherry-pick".to_owned(),
+        };
+        if widgets::menu_item(ui, &pick, None).clicked() {
+            actions.push(Action::CherryPick(c.id.clone()));
+        }
+        if widgets::menu_item(ui, "Revert", None).clicked() {
+            actions.push(Action::Revert(c.id.clone()));
+        }
+        widgets::menu_separator(ui);
         if widgets::menu_item(ui, "Копировать SHA", None).clicked() {
             ui.ctx().copy_text(c.id.clone());
         }
