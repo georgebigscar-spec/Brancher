@@ -4,6 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use std::collections::BTreeSet;
+
+use brancher_core::patch;
 use brancher_core::{ChangeKind, DiffTarget, LineKind, RefKind};
 use brancher_git::{CancelToken, Git, GitError, Runner};
 
@@ -26,6 +29,8 @@ impl TempRepo {
         git(&["config", "user.name", "Тест"]);
         git(&["config", "user.email", "test@example.com"]);
         git(&["config", "commit.gpgsign", "false"]);
+        // На Windows-раннерах autocrlf часто включён глобально, а тесты проверяют байты.
+        git(&["config", "core.autocrlf", "false"]);
         Self(dir)
     }
     fn path(&self) -> &Path {
@@ -188,6 +193,73 @@ fn diffs_for_commits_and_working_tree() {
         .unwrap();
     assert_eq!(d[0].stats(), (1, 1));
     assert_eq!(d[0].hunks[0].lines[2].text, "три");
+}
+
+#[test]
+fn partial_stage_and_unstage_by_lines() {
+    let repo = TempRepo::new("lines");
+    let c = CancelToken::new();
+    let g = git();
+    let target = |staged| DiffTarget::Change {
+        path: "f.txt".into(),
+        staged,
+        untracked: false,
+    };
+    let cached = |g: &Git| {
+        let out = g
+            .runner
+            .run(Some(repo.path()), &["show", ":f.txt"], None, &c)
+            .unwrap();
+        out.stdout_lossy()
+    };
+
+    repo.write("f.txt", "a\r\nb\r\nc\r\nd\r\n");
+    g.stage(repo.path(), &["f.txt".into()], &c).unwrap();
+    g.commit(repo.path(), "base", false, &c).unwrap();
+    // Две правки в одном ханке: b → B и новая строка e в конце (CRLF сохраняется).
+    repo.write("f.txt", "a\r\nB\r\nc\r\nd\r\ne\r\n");
+
+    let d = g.diff(repo.path(), &target(false), &c).unwrap();
+    let lines = &d[0].hunks[0].lines;
+    let e = lines
+        .iter()
+        .position(|l| l.kind == LineKind::Added && l.text == "e")
+        .unwrap();
+    let p = patch::build(&d[0], &BTreeSet::from([(0, e)]), false).unwrap();
+    g.apply_cached(repo.path(), &p, false, &c).unwrap();
+    assert_eq!(cached(&g), "a\r\nb\r\nc\r\nd\r\ne\r\n");
+
+    // Теперь индексируем b → B ханком целиком и снимаем из индекса только e.
+    let d = g.diff(repo.path(), &target(false), &c).unwrap();
+    let p = patch::build(&d[0], &patch::hunk_lines(&d[0], 0), false).unwrap();
+    g.apply_cached(repo.path(), &p, false, &c).unwrap();
+    assert_eq!(cached(&g), "a\r\nB\r\nc\r\nd\r\ne\r\n");
+
+    let d = g.diff(repo.path(), &target(true), &c).unwrap();
+    let lines = &d[0].hunks[0].lines;
+    let e = lines
+        .iter()
+        .position(|l| l.kind == LineKind::Added && l.text == "e")
+        .unwrap();
+    let p = patch::build(&d[0], &BTreeSet::from([(0, e)]), true).unwrap();
+    g.apply_cached(repo.path(), &p, true, &c).unwrap();
+    assert_eq!(cached(&g), "a\r\nB\r\nc\r\nd\r\n");
+
+    // Untracked: в индекс попадает только выбранная строка нового файла.
+    repo.write("new.txt", "one\ntwo\n");
+    let untracked = DiffTarget::Change {
+        path: "new.txt".into(),
+        staged: false,
+        untracked: true,
+    };
+    let d = g.diff(repo.path(), &untracked, &c).unwrap();
+    let p = patch::build(&d[0], &BTreeSet::from([(0, 1)]), false).unwrap();
+    g.apply_cached(repo.path(), &p, false, &c).unwrap();
+    let out = g
+        .runner
+        .run(Some(repo.path()), &["show", ":new.txt"], None, &c)
+        .unwrap();
+    assert_eq!(out.stdout_lossy(), "two\n");
 }
 
 #[test]

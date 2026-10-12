@@ -31,6 +31,8 @@ pub struct DiffLine {
     pub new_no: Option<u32>,
     /// Текст строки без маркера и без перевода строки.
     pub text: String,
+    /// Строка заканчивалась на `\r\n` (нужно, чтобы собрать patch байт в байт).
+    pub cr: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +53,10 @@ pub struct FileDiff {
     /// Путь после изменения; `None` — файл удалён.
     pub new_path: Option<String>,
     pub binary: bool,
+    /// Режим из `new file mode` / `deleted file mode`.
+    pub mode: Option<String>,
+    /// В тексте были не-UTF-8 байты: показать можно, собрать patch — нет.
+    pub lossy: bool,
     pub hunks: Vec<Hunk>,
 }
 
@@ -139,6 +145,7 @@ mod tests {
             old_no: None,
             new_no: None,
             text: String::new(),
+            cr: false,
         }
     }
 

@@ -26,6 +26,7 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
                 git.unstage(repo, paths, has_head, cancel)?
             }
             Job::Commit { message, amend } => git.commit(repo, message, *amend, cancel)?,
+            Job::ApplyPatch { patch, reverse } => git.apply_cached(repo, patch, *reverse, cancel)?,
             Job::Diff(target) => {
                 let diff = git.diff(repo, target, cancel).map(Diff::new);
                 emit(JobResult::Diff {

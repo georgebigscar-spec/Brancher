@@ -1,10 +1,12 @@
 //! Состояние приложения и переходы: `Action` → `reduce` → `Effect`, `JobResult` → `apply_result`.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::diff::{Diff, DiffTarget};
+use crate::diff::{Diff, DiffRow, DiffTarget, LineKind};
 use crate::graph::CommitGraph;
 use crate::model::*;
+use crate::patch::{self, LineRef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RepoId(pub u64);
@@ -23,6 +25,11 @@ pub enum Job {
         amend: bool,
     },
     Diff(DiffTarget),
+    /// Частичный stage (`reverse = false`) или unstage выбранных строк.
+    ApplyPatch {
+        patch: String,
+        reverse: bool,
+    },
 }
 
 impl Job {
@@ -38,6 +45,8 @@ impl Job {
             Job::Unstage(_) => "unstage",
             Job::Commit { .. } => "commit",
             Job::Diff(_) => "diff",
+            Job::ApplyPatch { reverse: false, .. } => "stage-lines",
+            Job::ApplyPatch { reverse: true, .. } => "unstage-lines",
         }
     }
 }
@@ -89,6 +98,22 @@ pub enum Action {
         staged: bool,
     },
     CloseDiff,
+    /// Клик по изменённой строке diff: `extend` (Shift) — выделить диапазон от прошлого
+    /// клика, `toggle` (Ctrl/Cmd) — добавить или убрать строку, иначе выбрать только её.
+    SelectDiffLine {
+        file: usize,
+        hunk: usize,
+        line: usize,
+        extend: bool,
+        toggle: bool,
+    },
+    /// Stage (или unstage для индекса) выбранных строк.
+    ApplyDiffSelection,
+    /// Stage (или unstage) ханка целиком.
+    ApplyHunk {
+        file: usize,
+        hunk: usize,
+    },
     Stage(Vec<String>),
     StageAll,
     Unstage(Vec<String>),
@@ -144,6 +169,10 @@ pub struct RepoState {
     pub diff_target: Option<DiffTarget>,
     /// Загруженный diff для `diff_target`; `None`, пока идёт загрузка.
     pub diff: Option<Diff>,
+    /// Выбранные строки diff: `(файл, ханк, строка)`. Сбрасывается при каждой загрузке diff.
+    pub diff_selection: BTreeSet<(usize, usize, usize)>,
+    /// Строка последнего клика — начало диапазона для Shift+клик.
+    pub diff_anchor: Option<(usize, usize, usize)>,
     pub commit_message: String,
     pub amend: bool,
     /// Сколько задач сейчас выполняется.
@@ -164,15 +193,95 @@ impl RepoState {
         }
         self.diff_target = Some(target.clone());
         self.diff = None;
+        self.clear_selection();
         vec![Effect::Spawn {
             repo: self.id(),
             job: Job::Diff(target),
         }]
     }
 
+    fn clear_selection(&mut self) {
+        self.diff_selection.clear();
+        self.diff_anchor = None;
+    }
+
+    /// Можно ли выбирать строки: только у diff файла рабочей копии, не у коммита.
+    pub fn can_select_lines(&self) -> bool {
+        matches!(self.diff_target, Some(DiffTarget::Change { .. })) && self.diff.is_some()
+    }
+
+    fn select_line(&mut self, at: (usize, usize, usize), extend: bool, toggle: bool) {
+        let Some(diff) = self.diff.as_ref().filter(|_| self.can_select_lines()) else {
+            return;
+        };
+        let is_change = |&(f, h, l): &(usize, usize, usize)| {
+            let line = diff
+                .files
+                .get(f)
+                .and_then(|x| x.hunks.get(h))
+                .and_then(|x| x.lines.get(l));
+            line.is_some_and(|l| matches!(l.kind, LineKind::Added | LineKind::Removed))
+        };
+        if !is_change(&at) {
+            return;
+        }
+        match (extend, self.diff_anchor) {
+            (true, Some(anchor)) => {
+                let (a, b) = if anchor <= at { (anchor, at) } else { (at, anchor) };
+                let range = diff.rows.iter().filter_map(|r| match *r {
+                    DiffRow::Line(f, h, l) if (f, h, l) >= a && (f, h, l) <= b => Some((f, h, l)),
+                    _ => None,
+                });
+                let range: Vec<_> = range.filter(is_change).collect();
+                if !toggle {
+                    self.diff_selection.clear();
+                }
+                self.diff_selection.extend(range);
+                return;
+            }
+            _ if toggle => {
+                if !self.diff_selection.remove(&at) {
+                    self.diff_selection.insert(at);
+                }
+            }
+            _ => {
+                self.diff_selection.clear();
+                self.diff_selection.insert(at);
+            }
+        }
+        self.diff_anchor = Some(at);
+    }
+
+    /// Patch для выбранных строк; направление — по стороне diff (индекс → unstage).
+    fn apply_lines(&self, selection: &BTreeSet<(usize, usize, usize)>) -> Result<Job, patch::PatchError> {
+        let (Some(diff), Some(DiffTarget::Change { staged, .. })) = (&self.diff, &self.diff_target) else {
+            return Err(patch::PatchError::NothingSelected);
+        };
+        let mut text = String::new();
+        for (f, file) in diff.files.iter().enumerate() {
+            let lines: BTreeSet<LineRef> = selection
+                .iter()
+                .filter(|(sf, ..)| *sf == f)
+                .map(|&(_, h, l)| (h, l))
+                .collect();
+            if lines.is_empty() {
+                continue;
+            }
+            text.push_str(&patch::build(file, &lines, *staged)?);
+        }
+        if text.is_empty() {
+            return Err(patch::PatchError::NothingSelected);
+        }
+        Ok(Job::ApplyPatch {
+            patch: text,
+            reverse: *staged,
+        })
+    }
+
     fn close_diff(&mut self) {
         self.diff_target = None;
         self.diff = None;
+        self.clear_selection();
     }
 
     /// Цель diff для файла рабочей копии, если он всё ещё изменён на этой стороне.
@@ -335,6 +444,44 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     }
                     None => vec![],
                 },
+                Action::SelectDiffLine {
+                    file,
+                    hunk,
+                    line,
+                    extend,
+                    toggle,
+                } => {
+                    repo.select_line((file, hunk, line), extend, toggle);
+                    vec![]
+                }
+                Action::ApplyDiffSelection | Action::ApplyHunk { .. } => {
+                    let selection = match action {
+                        Action::ApplyHunk { file, hunk } => {
+                            match repo.diff.as_ref().and_then(|d| d.files.get(file)) {
+                                Some(f) if hunk < f.hunks.len() => patch::hunk_lines(f, hunk)
+                                    .into_iter()
+                                    .map(|(h, l)| (file, h, l))
+                                    .collect(),
+                                _ => BTreeSet::new(),
+                            }
+                        }
+                        _ => repo.diff_selection.clone(),
+                    };
+                    match repo.apply_lines(&selection) {
+                        Ok(job) => {
+                            repo.clear_selection();
+                            spawn(job)
+                        }
+                        Err(e) => {
+                            state.notifications.push(Notification {
+                                severity: Severity::Info,
+                                title: "Частичный stage недоступен".into(),
+                                details: e.to_string(),
+                            });
+                            vec![]
+                        }
+                    }
+                }
                 Action::CloseDiff => {
                     repo.close_diff();
                     repo.selected_commit = None;
@@ -423,7 +570,11 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
             // Результат для уже закрытой или сменённой цели не нужен.
             if r.diff_target.as_ref() == Some(&target) {
                 match result {
-                    Ok(d) => r.diff = Some(d),
+                    Ok(d) => {
+                        // Номера строк в новом diff другие — выделение больше не валидно.
+                        r.diff = Some(d);
+                        r.clear_selection();
+                    }
                     Err(e) => {
                         r.close_diff();
                         error = Some(("Не удалось получить diff".to_owned(), e));
@@ -486,6 +637,7 @@ fn refresh_change_diff(r: &mut RepoState) -> Vec<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::{DiffLine, FileDiff, Hunk};
 
     fn open(state: &mut AppState, p: &str) -> RepoId {
         let fx = reduce(state, Action::OpenRepo(PathBuf::from(p)));
@@ -750,6 +902,143 @@ mod tests {
             },
         );
         assert!(fx.is_empty());
+    }
+
+    /// Репозиторий с открытым diff файла `f.txt` (рабочая копия или индекс).
+    fn with_change_diff(staged: bool) -> (AppState, RepoId) {
+        let mut s = AppState::new();
+        let id = open(&mut s, "/a");
+        let kind = Some(ChangeKind::Modified);
+        let (st, un) = if staged { (kind, None) } else { (None, kind) };
+        set_status(&mut s, id, vec![change("f.txt", st, un)]);
+        reduce(
+            &mut s,
+            Action::SelectChange {
+                path: "f.txt".into(),
+                staged,
+            },
+        );
+        let line = |kind, text: &str| DiffLine {
+            kind,
+            old_no: None,
+            new_no: None,
+            text: text.into(),
+            cr: false,
+        };
+        let file = FileDiff {
+            old_path: Some("f.txt".into()),
+            new_path: Some("f.txt".into()),
+            hunks: vec![Hunk {
+                header: "@@ -1,2 +1,3 @@".into(),
+                old_start: 1,
+                old_count: 2,
+                new_start: 1,
+                new_count: 3,
+                lines: vec![
+                    line(LineKind::Context, "a"),
+                    line(LineKind::Removed, "b"),
+                    line(LineKind::Added, "B"),
+                    line(LineKind::Added, "c"),
+                ],
+            }],
+            ..Default::default()
+        };
+        let target = s.active_repo().unwrap().diff_target.clone().unwrap();
+        apply_result(
+            &mut s,
+            id,
+            JobResult::Diff {
+                target,
+                result: Ok(Diff::new(vec![file])),
+            },
+        );
+        (s, id)
+    }
+
+    fn click(s: &mut AppState, line: usize, extend: bool, toggle: bool) {
+        reduce(
+            s,
+            Action::SelectDiffLine {
+                file: 0,
+                hunk: 0,
+                line,
+                extend,
+                toggle,
+            },
+        );
+    }
+
+    #[test]
+    fn line_selection_click_shift_and_toggle() {
+        let (mut s, _) = with_change_diff(false);
+        let selection = |s: &AppState| -> Vec<usize> {
+            s.active_repo()
+                .unwrap()
+                .diff_selection
+                .iter()
+                .map(|&(_, _, l)| l)
+                .collect()
+        };
+        click(&mut s, 0, false, false); // контекст не выбирается
+        assert!(selection(&s).is_empty());
+        click(&mut s, 1, false, false);
+        click(&mut s, 3, true, false);
+        assert_eq!(selection(&s), [1, 2, 3]);
+        click(&mut s, 2, false, true);
+        assert_eq!(selection(&s), [1, 3]);
+        click(&mut s, 3, false, false);
+        assert_eq!(selection(&s), [3]);
+    }
+
+    #[test]
+    fn applying_selection_spawns_patch_in_right_direction() {
+        let (mut s, id) = with_change_diff(false);
+        click(&mut s, 3, false, false);
+        let fx = reduce(&mut s, Action::ApplyDiffSelection);
+        let Effect::Spawn {
+            job: Job::ApplyPatch { patch, reverse },
+            ..
+        } = &fx[0]
+        else {
+            panic!("{fx:?}")
+        };
+        assert!(!reverse);
+        assert!(patch.ends_with("@@ -1,2 +1,3 @@\n a\n b\n+c\n"), "{patch}");
+        assert!(s.active_repo().unwrap().diff_selection.is_empty());
+        // После stage — обычное обновление, а затем перечитывание diff.
+        let fx = apply_result(
+            &mut s,
+            id,
+            JobResult::Finished {
+                job: "stage-lines",
+                result: Ok(()),
+            },
+        );
+        assert!(matches!(
+            fx[0],
+            Effect::Spawn {
+                job: Job::Refresh { .. },
+                ..
+            }
+        ));
+
+        let (mut s, _) = with_change_diff(true);
+        let fx = reduce(&mut s, Action::ApplyHunk { file: 0, hunk: 0 });
+        assert!(matches!(
+            &fx[0],
+            Effect::Spawn {
+                job: Job::ApplyPatch { reverse: true, .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn empty_selection_notifies_instead_of_running_git() {
+        let (mut s, _) = with_change_diff(false);
+        assert!(reduce(&mut s, Action::ApplyDiffSelection).is_empty());
+        assert_eq!(s.notifications.len(), 1);
+        assert_eq!(s.notifications[0].severity, Severity::Info);
     }
 
     #[test]
