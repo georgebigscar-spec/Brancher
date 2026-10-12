@@ -1,8 +1,8 @@
 //! Вкладка репозитория: ветки слева, история в центре, изменения и коммит справа.
-//! Граф коммитов, diff и blame — отдельные виджеты этого крейта, следующие шаги MVP.
+//! Граф коммитов рисует [`crate::graph`]; diff и blame — следующие шаги MVP.
 
+use brancher_core::{Action, Change, Commit, RefKind, RepoState};
 use egui::{RichText, Ui};
-use brancher_core::{Action, Change, RefKind, RepoState};
 
 const ROW_HEIGHT: f32 = 24.0;
 
@@ -87,24 +87,69 @@ fn history(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
         widgets::muted(ui, "Коммитов пока нет.");
         return;
     }
+    let graph_width = crate::graph::column_width(&repo.graph);
+    let theme = widgets::Theme::get(ui.ctx());
+    // Строки рисуются вручную ровно по ROW_HEIGHT: так show_rows знает точную высоту,
+    // а линии графа соседних строк смыкаются без зазоров.
+    ui.spacing_mut().item_spacing.y = 0.0;
     egui::ScrollArea::vertical()
         .id_salt("history")
         .auto_shrink([false, false])
         .show_rows(ui, ROW_HEIGHT, repo.history.len(), |ui, range| {
-            for c in &repo.history[range] {
+            for i in range {
+                let c = &repo.history[i];
                 let selected = repo.selected_commit.as_deref() == Some(c.id.as_str());
-                ui.horizontal(|ui| {
-                    ui.set_height(ROW_HEIGHT);
-                    ui.monospace(c.short_id());
-                    if ui.selectable_label(selected, &c.subject).clicked() {
-                        actions.push(Action::SelectCommit(Some(c.id.clone())));
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        widgets::muted(ui, &c.author.name);
-                    });
-                });
+                let size = egui::vec2(ui.available_width(), ROW_HEIGHT);
+                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                if response.clicked() {
+                    actions.push(Action::SelectCommit(Some(c.id.clone())));
+                }
+                if !ui.is_rect_visible(rect) {
+                    continue;
+                }
+                let painter = ui.painter_at(rect);
+                if selected || response.hovered() {
+                    painter.rect_filled(rect, 0.0, theme.accent);
+                }
+                if let Some(row) = repo.graph.rows.get(i) {
+                    let graph = egui::Rect::from_min_size(rect.min, egui::vec2(graph_width, ROW_HEIGHT));
+                    crate::graph::paint_row(ui, graph, row, c.is_merge());
+                }
+                history_text(&painter, rect, graph_width, c, &theme);
             }
         });
+}
+
+/// Короткий SHA, заголовок и автор в одной строке истории.
+fn history_text(painter: &egui::Painter, rect: egui::Rect, graph_width: f32, c: &Commit, t: &widgets::Theme) {
+    let y = rect.center().y;
+    let mono = egui::FontId::monospace(13.0);
+    let body = egui::FontId::proportional(14.0);
+    let author = painter.layout_no_wrap(c.author.name.clone(), body.clone(), t.muted_foreground);
+    let author_x = rect.right() - 8.0 - author.size().x;
+    painter.galley(
+        egui::pos2(author_x, y - author.size().y / 2.0),
+        author,
+        t.muted_foreground,
+    );
+
+    let id_x = rect.left() + graph_width + 4.0;
+    let id = painter.text(
+        egui::pos2(id_x, y),
+        egui::Align2::LEFT_CENTER,
+        c.short_id(),
+        mono,
+        t.muted_foreground,
+    );
+    let subject_x = id.right() + 12.0;
+    let subject_clip = egui::Rect::from_x_y_ranges(subject_x..=author_x - 12.0, rect.y_range());
+    painter.with_clip_rect(subject_clip).text(
+        egui::pos2(subject_x, y),
+        egui::Align2::LEFT_CENTER,
+        &c.subject,
+        body,
+        t.foreground,
+    );
 }
 
 fn changes(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use brancher_core::{Job, JobError, JobResult};
+use brancher_core::{History, Job, JobError, JobResult};
 use brancher_git::{CancelToken, Git};
 
 /// Выполняет задачу и отдаёт результаты по мере готовности через `emit`.
@@ -16,9 +16,9 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
                     return Err(e);
                 }
                 emit(JobResult::Refs(git.refs(repo, cancel).map_err(Into::into)));
-                emit(JobResult::History(
-                    git.log(repo, *history_limit, cancel).map_err(Into::into),
-                ));
+                // Раскладка графа считается здесь, в worker-потоке, а не в кадре UI.
+                let history = git.log(repo, *history_limit, cancel).map(History::new);
+                emit(JobResult::History(history.map_err(Into::into)));
             }
             Job::Stage(paths) => git.stage(repo, paths, cancel)?,
             Job::Unstage(paths) => {

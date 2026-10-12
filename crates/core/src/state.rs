@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::graph::CommitGraph;
 use crate::model::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -38,11 +39,25 @@ impl Job {
     }
 }
 
+/// История коммитов вместе с раскладкой графа, посчитанной в фоне.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct History {
+    pub commits: Vec<Commit>,
+    pub graph: CommitGraph,
+}
+
+impl History {
+    pub fn new(commits: Vec<Commit>) -> Self {
+        let graph = CommitGraph::build(&commits);
+        Self { commits, graph }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobResult {
     Status(Result<RepoStatus, JobError>),
     Refs(Result<Vec<GitRef>, JobError>),
-    History(Result<Vec<Commit>, JobError>),
+    History(Result<History, JobError>),
     /// Задача завершена (после этого счётчик занятости уменьшается).
     Finished {
         job: &'static str,
@@ -108,6 +123,8 @@ pub struct RepoState {
     pub status: Option<RepoStatus>,
     pub refs: Vec<GitRef>,
     pub history: Vec<Commit>,
+    /// Раскладка графа для `history`, строка в строку.
+    pub graph: CommitGraph,
     pub selected_commit: Option<Oid>,
     pub commit_message: String,
     pub amend: bool,
@@ -323,7 +340,10 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
     match result {
         JobResult::Status(Ok(s)) => r.status = Some(s),
         JobResult::Refs(Ok(refs)) => r.refs = refs,
-        JobResult::History(Ok(h)) => r.history = h,
+        JobResult::History(Ok(h)) => {
+            r.history = h.commits;
+            r.graph = h.graph;
+        }
         JobResult::Status(Err(e)) | JobResult::Refs(Err(e)) | JobResult::History(Err(e)) => {
             error = Some(("Не удалось прочитать репозиторий".to_owned(), e))
         }
@@ -480,7 +500,7 @@ mod tests {
         let mut s = AppState::new();
         let id = open(&mut s, "/a");
         reduce(&mut s, Action::CloseTab(0));
-        assert!(apply_result(&mut s, id, JobResult::History(Ok(vec![]))).is_empty());
+        assert!(apply_result(&mut s, id, JobResult::History(Ok(History::default()))).is_empty());
     }
 
     #[test]

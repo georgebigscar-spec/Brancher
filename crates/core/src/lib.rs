@@ -4,8 +4,10 @@
 //! [`AppState`] и возвращает [`Effect`]-ы (что запустить в фоне), а результаты фоновых
 //! задач применяются через [`apply_result`].
 
+pub mod graph;
 pub mod model;
 pub mod state;
 
+pub use graph::*;
 pub use model::*;
 pub use state::*;
