@@ -1001,6 +1001,9 @@ fn absorb_moves_staged_hunks_into_branch_commits() {
     let mut changed: Vec<_> = st.changes.iter().map(|c| c.path.clone()).collect();
     changed.sort();
     assert_eq!(changed, ["f.txt", "h.txt"]);
+    // То, что не ушло в коммиты, остаётся проиндексированным; неиндексированное — нет.
+    let staged: Vec<_> = st.staged().map(|c| c.path.as_str()).collect();
+    assert_eq!(staged, ["f.txt"]);
 }
 
 #[test]
@@ -1081,4 +1084,20 @@ fn merged_branches_are_marked_and_deleted_together() {
         .collect();
     assert_eq!(left, ["main", "wip"]);
     assert!(merged(&g).is_empty());
+
+    // Squash-слияние: два коммита ветки стали одним коммитом в main.
+    g.create_branch(p, "squashed", "main", true, &c).unwrap();
+    commit("s1.txt", "one");
+    commit("s2.txt", "two");
+    g.switch(p, "main", &c).unwrap();
+    let ok = Command::new("git")
+        .args(["merge", "--squash", "squashed"])
+        .current_dir(p)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    g.commit(p, "squash", false, &c).unwrap();
+    commit("after.txt", "later");
+    assert_eq!(merged(&g), ["squashed"]);
 }
