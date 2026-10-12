@@ -48,6 +48,7 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
                 checkout,
             } => git.create_branch(repo, name, start, *checkout, cancel)?,
             Job::DeleteBranch(name) => git.delete_branch(repo, name, true, cancel)?,
+            Job::DeleteBranches(names) => git.delete_branches(repo, names, cancel)?,
             Job::Fetch => git.fetch(repo, cancel, &mut |p| emit(JobResult::Progress(p)))?,
             Job::FetchRemote(name) => {
                 git.fetch_remote(repo, name, cancel, &mut |p| emit(JobResult::Progress(p)))?

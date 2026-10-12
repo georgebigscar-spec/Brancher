@@ -558,7 +558,14 @@ impl Git {
         let out = self
             .runner
             .run(Some(repo), &commands::refs::args(), None, cancel)?;
-        commands::refs::parse(&out.stdout)
+        let mut refs = commands::refs::parse(&out.stdout)?;
+        if let Some(trunk) = commands::refs::trunk(&refs).map(|t| t.full_name.clone()) {
+            let args = commands::refs::merged_args(&trunk);
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            let out = self.runner.run(Some(repo), &args, None, cancel)?;
+            commands::refs::mark_merged(&mut refs, &out.stdout);
+        }
+        Ok(refs)
     }
 
     /// История всех веток (`--all`); в пустом репозитории — пустой список.
@@ -701,6 +708,18 @@ impl Git {
         cancel: &CancelToken,
     ) -> Result<(), GitError> {
         self.run_args(repo, &commands::branch::delete_args(name, force), None, cancel)
+    }
+
+    /// Удаляет несколько локальных веток сразу (`branch -D`).
+    pub fn delete_branches(
+        &self,
+        repo: &Path,
+        names: &[String],
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        let mut args = vec!["branch".to_owned(), "-D".to_owned()];
+        args.extend(names.iter().cloned());
+        self.run_args(repo, &args, None, cancel)
     }
 
     pub fn stashes(&self, repo: &Path, cancel: &CancelToken) -> Result<Vec<Stash>, GitError> {

@@ -52,9 +52,41 @@ pub fn parse(out: &[u8]) -> Result<Vec<GitRef>, GitError> {
             ahead,
             behind,
             upstream_gone: gone,
+            merged: false,
         });
     }
     Ok(refs)
+}
+
+/// Основная ветка репозитория: локальная `main`, иначе `master`.
+pub fn trunk(refs: &[GitRef]) -> Option<&GitRef> {
+    ["main", "master"].iter().find_map(|n| {
+        refs.iter()
+            .find(|r| r.kind == RefKind::LocalBranch && r.name == *n)
+    })
+}
+
+/// Локальные ветки, достижимые из `trunk` (полное имя).
+pub fn merged_args(trunk: &str) -> Vec<String> {
+    vec![
+        "for-each-ref".into(),
+        format!("--merged={trunk}"),
+        "--format=%(refname)".into(),
+        "refs/heads".into(),
+    ]
+}
+
+/// Отмечает слитые ветки по выводу [`merged_args`]. Сама основная ветка и ветки на её
+/// вершине (только что созданные, без своих коммитов) слитыми не считаются.
+pub fn mark_merged(refs: &mut [GitRef], out: &[u8]) {
+    let Some(trunk) = trunk(refs).map(|t| (t.full_name.clone(), t.target.clone())) else {
+        return;
+    };
+    let text = utf8(out);
+    let merged: Vec<&str> = text.lines().collect();
+    for r in refs.iter_mut().filter(|r| r.kind == RefKind::LocalBranch) {
+        r.merged = r.full_name != trunk.0 && r.target != trunk.1 && merged.contains(&r.full_name.as_str());
+    }
 }
 
 fn split_fields(line: &[u8]) -> Vec<String> {
@@ -82,6 +114,35 @@ fn parse_track(s: &str) -> (u32, u32, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marks_merged_branches_except_trunk_and_fresh_ones() {
+        let r = |name: &str, target: &str| GitRef {
+            name: name.into(),
+            full_name: format!("refs/heads/{name}"),
+            kind: RefKind::LocalBranch,
+            target: target.into(),
+            is_head: false,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            upstream_gone: false,
+            merged: false,
+        };
+        let mut refs = vec![r("done", "a"), r("fresh", "t"), r("main", "t"), r("wip", "w")];
+        assert_eq!(trunk(&refs).unwrap().name, "main");
+        assert_eq!(merged_args("refs/heads/main")[1], "--merged=refs/heads/main");
+        mark_merged(&mut refs, b"refs/heads/done\nrefs/heads/fresh\nrefs/heads/main\n");
+        let merged: Vec<_> = refs
+            .iter()
+            .filter(|r| r.merged)
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(merged, ["done"]);
+        let mut no_trunk = vec![r("x", "a")];
+        mark_merged(&mut no_trunk, b"refs/heads/x\n");
+        assert!(!no_trunk[0].merged);
+    }
 
     #[test]
     fn parses_branches_remotes_and_tags() {
