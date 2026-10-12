@@ -1,5 +1,5 @@
-//! Blame и история файла в нижней половине центральной панели, на месте diff.
-//! Клик по строке blame или по коммиту истории открывает diff этого коммита.
+//! Blame, история файла и сравнение веток в нижней половине центральной панели, на месте diff.
+//! Клик по строке blame или по коммиту открывает diff этого коммита.
 
 use brancher_core::{Action, Blame, Commit, FileView, RepoState};
 use egui::{pos2, vec2, Align2, FontId, Sense, Ui};
@@ -7,12 +7,23 @@ use egui::{pos2, vec2, Align2, FontId, Sense, Ui};
 const ROW_HEIGHT: f32 = 20.0;
 
 pub fn show(ui: &mut Ui, repo: &RepoState, view: &FileView, actions: &mut Vec<Action>) {
+    if let FileView::Compare {
+        base,
+        other,
+        only_other,
+        only_base,
+    } = view
+    {
+        let lists = only_other.as_deref().zip(only_base.as_deref());
+        return compare(ui, repo, base, other, lists, actions);
+    }
     header(ui, view, actions);
     ui.separator();
     match view {
         FileView::Blame { blame: None, .. } | FileView::History { commits: None, .. } => {
             ui.spinner();
         }
+        FileView::Compare { .. } => unreachable!("показано выше"),
         FileView::Blame {
             blame: Some(blame), ..
         } => blame_rows(ui, blame, actions),
@@ -28,7 +39,7 @@ fn header(ui: &mut Ui, view: &FileView, actions: &mut Vec<Action>) {
         let path = view.path().to_owned();
         let (kind, other) = match view {
             FileView::Blame { .. } => ("Blame", "История файла"),
-            FileView::History { .. } => ("История", "Blame"),
+            FileView::History { .. } | FileView::Compare { .. } => ("История", "Blame"),
         };
         ui.add(widgets::Badge::new(kind).secondary());
         ui.add(egui::Label::new(egui::RichText::new(&path).strong()).truncate());
@@ -40,13 +51,11 @@ fn header(ui: &mut Ui, view: &FileView, actions: &mut Vec<Action>) {
                 .add(widgets::Button::ghost("×").size(widgets::ButtonSize::Icon))
                 .on_hover_text("Закрыть (Esc)");
             let esc = ui.memory(|m| m.focused().is_none()) && ui.input(|i| i.key_pressed(egui::Key::Escape));
-            if close.clicked() || esc {
-                actions.push(Action::CloseFileView);
-            }
+            close_on(close, esc, actions);
             if ui.add(widgets::Button::outline(other)).clicked() {
                 actions.push(match view {
                     FileView::Blame { .. } => Action::ShowFileHistory(path.clone()),
-                    FileView::History { .. } => Action::ShowBlame { path, rev: None },
+                    _ => Action::ShowBlame { path, rev: None },
                 });
             }
         });
@@ -152,13 +161,81 @@ fn history_rows(ui: &mut Ui, repo: &RepoState, commits: &[Commit], actions: &mut
         widgets::muted(ui, "Коммитов с этим файлом нет.");
         return;
     }
+    commit_rows(ui, "file-history", repo, commits, actions);
+}
+
+fn close_on(close: egui::Response, esc: bool, actions: &mut Vec<Action>) {
+    if close.clicked() || esc {
+        actions.push(Action::CloseFileView);
+    }
+}
+
+/// Сравнение `other` с текущей веткой: слева коммиты, которые принесёт merge `other`,
+/// справа — коммиты текущей ветки, которых нет в `other`.
+fn compare(
+    ui: &mut Ui,
+    repo: &RepoState,
+    base: &str,
+    other: &str,
+    lists: Option<(&[Commit], &[Commit])>,
+    actions: &mut Vec<Action>,
+) {
+    ui.horizontal(|ui| {
+        ui.add(widgets::Badge::new("Сравнение").secondary());
+        ui.add(egui::Label::new(egui::RichText::new(format!("{other} ↔ {base}")).strong()).truncate());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let close = ui
+                .add(widgets::Button::ghost("×").size(widgets::ButtonSize::Icon))
+                .on_hover_text("Закрыть (Esc)");
+            let esc = ui.memory(|m| m.focused().is_none()) && ui.input(|i| i.key_pressed(egui::Key::Escape));
+            close_on(close, esc, actions);
+            let diff = ui
+                .add(widgets::Button::outline("Diff изменений"))
+                .on_hover_text(format!(
+                    "Что изменилось в {other} с общего предка с {base}: то, что принесёт слияние"
+                ));
+            if diff.clicked() {
+                actions.push(Action::ShowCompareDiff);
+            }
+            if lists.is_some_and(|(theirs, _)| !theirs.is_empty())
+                && repo.operation().is_none()
+                && ui
+                    .add(widgets::Button::outline(format!("Слить в {base}")))
+                    .clicked()
+            {
+                actions.push(Action::Merge(other.to_owned()));
+            }
+        });
+    });
+    ui.separator();
+    let Some((theirs, ours)) = lists else {
+        ui.spinner();
+        return;
+    };
+    ui.columns(2, |cols| {
+        let sides = [
+            (theirs, other, base, "compare-theirs"),
+            (ours, base, other, "compare-ours"),
+        ];
+        for (ui, (commits, from, to, salt)) in cols.iter_mut().zip(sides) {
+            ui.label(egui::RichText::new(format!("Только в {from}: {}", commits.len())).strong());
+            if commits.is_empty() {
+                widgets::muted(ui, format!("Всё из {from} уже есть в {to}."));
+            } else {
+                commit_rows(ui, salt, repo, commits, actions);
+            }
+        }
+    });
+}
+
+fn commit_rows(ui: &mut Ui, salt: &str, repo: &RepoState, commits: &[Commit], actions: &mut Vec<Action>) {
     let t = widgets::Theme::get(ui.ctx());
     let mono = FontId::monospace(13.0);
     let body = FontId::proportional(14.0);
     let current = repo.status.as_ref().and_then(|s| s.branch.as_deref());
     ui.spacing_mut().item_spacing.y = 0.0;
     egui::ScrollArea::vertical()
-        .id_salt("file-history")
+        .id_salt(salt)
         .auto_shrink([false, false])
         .show_rows(ui, 24.0, commits.len(), |ui, range| {
             for c in &commits[range] {

@@ -58,6 +58,7 @@ fn header(
                 format!("{} {subject}", &id[..id.len().min(10)])
             }
             DiffTarget::Change { path, .. } => path.clone(),
+            DiffTarget::Range { from, to } => format!("{to} ↔ {from}"),
         };
         ui.add(egui::Label::new(egui::RichText::new(title).strong()).truncate());
         match target {
@@ -71,6 +72,10 @@ fn header(
                 ui.add(widgets::Badge::new("рабочая копия").outline());
             }
             DiffTarget::Commit { .. } => {}
+            DiffTarget::Range { from, to } => {
+                ui.add(widgets::Badge::new("сравнение").outline())
+                    .on_hover_text(format!("Что принесёт слияние {to} в {from}"));
+            }
         }
         if let Some(diff) = &repo.diff {
             let (add, del) = diff
@@ -95,6 +100,11 @@ fn header(
                 .changed()
             {
                 actions.push(Action::SetSideBySide(split));
+            }
+            if let DiffTarget::Range { to, .. } = target {
+                if ui.add(widgets::Button::outline("Коммиты")).clicked() {
+                    actions.push(Action::CompareWith(to.clone()));
+                }
             }
             selection_controls(ui, repo, target, actions);
         });
@@ -151,6 +161,7 @@ impl Paint<'_> {
             (Some(DiffTarget::Change { untracked: true, .. }), _, _) => None,
             (Some(DiffTarget::Change { path, .. }), _, _) => Some((path.clone(), None)),
             (Some(DiffTarget::Commit { id, .. }), Some(new), _) => Some((new.clone(), Some(id.clone()))),
+            (Some(DiffTarget::Range { to, .. }), Some(new), _) => Some((new.clone(), Some(to.clone()))),
             (Some(DiffTarget::Commit { id, .. }), None, Some(old)) => {
                 Some((old.clone(), Some(format!("{id}^"))))
             }
