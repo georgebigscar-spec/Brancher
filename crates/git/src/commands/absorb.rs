@@ -68,7 +68,7 @@ pub fn parse_candidates(out: &[u8]) -> Vec<Candidate> {
     let text = String::from_utf8_lossy(out);
     let fields: Vec<&str> = text.split('\0').map(|f| f.trim_start_matches('\n')).collect();
     let mut list = Vec::new();
-    for rec in fields.chunks_exact(3) {
+    for rec in fields.as_chunks::<3>().0 {
         let parents: Vec<&str> = rec[1].split_whitespace().collect();
         if parents.len() > 1 {
             break;
