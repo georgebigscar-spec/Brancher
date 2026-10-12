@@ -101,6 +101,15 @@ impl ChangeKind {
     }
 }
 
+/// Remote репозитория из `git remote -v`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Remote {
+    pub name: String,
+    pub url: String,
+    /// Обычно совпадает с `url`; отличается, если задан `pushurl`.
+    pub push_url: String,
+}
+
 /// Изменённый файл рабочей копии.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {

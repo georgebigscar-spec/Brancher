@@ -26,6 +26,7 @@ pub fn show(ui: &mut Ui, repo: &RepoState, settings: &Settings, actions: &mut Ve
     crate::branches::new_branch_dialog(ui.ctx(), actions);
     crate::tags::new_tag_dialog(ui.ctx(), actions);
     crate::stash::dialog(ui.ctx(), actions);
+    crate::remotes::dialog(ui.ctx(), repo, actions);
     toolbar(ui, repo, actions);
     ui.separator();
     let height = ui.available_height();

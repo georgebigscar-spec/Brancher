@@ -50,6 +50,20 @@ pub enum Job {
     /// Удалить локальную ветку, даже не слитую (после подтверждения).
     DeleteBranch(String),
     Fetch,
+    /// Fetch одного remote.
+    FetchRemote(String),
+    AddRemote {
+        name: String,
+        url: String,
+    },
+    /// Удалить remote вместе с его remote-ветками (после подтверждения).
+    RemoveRemote(String),
+    /// Переименовать remote и/или сменить URL; `None` — не менять.
+    EditRemote {
+        name: String,
+        new_name: Option<String>,
+        url: Option<String>,
+    },
     /// Pull текущей ветки, только перемотка вперёд.
     Pull,
     /// Push текущей ветки; `set_upstream` — `(remote, ветка)`, если upstream ещё нет.
@@ -140,7 +154,10 @@ impl Job {
             Job::Switch(_) | Job::SwitchTrack(_) => "switch",
             Job::CreateBranch { .. } => "branch",
             Job::DeleteBranch(_) => "delete-branch",
-            Job::Fetch => "fetch",
+            Job::Fetch | Job::FetchRemote(_) => "fetch",
+            Job::AddRemote { .. } => "remote add",
+            Job::RemoveRemote(_) => "remote remove",
+            Job::EditRemote { .. } => "remote edit",
             Job::Pull => "pull",
             Job::Push { .. } => "push",
             Job::StashPush { .. } => "stash",
@@ -174,7 +191,7 @@ impl Job {
     pub fn is_network(&self) -> bool {
         matches!(
             self,
-            Job::Fetch | Job::Pull | Job::Push { .. } | Job::PushTag { .. }
+            Job::Fetch | Job::FetchRemote(_) | Job::Pull | Job::Push { .. } | Job::PushTag { .. }
         )
     }
 }
@@ -198,6 +215,7 @@ pub enum JobResult {
     Status(Result<RepoStatus, JobError>),
     Refs(Result<Vec<GitRef>, JobError>),
     Stashes(Result<Vec<Stash>, JobError>),
+    Remotes(Result<Vec<Remote>, JobError>),
     History(Result<History, JobError>),
     Diff {
         target: DiffTarget,
@@ -304,6 +322,19 @@ pub enum Action {
     Fetch,
     Pull,
     Push,
+    FetchRemote(String),
+    AddRemote {
+        name: String,
+        url: String,
+    },
+    /// Удалить remote (спрашивает подтверждение).
+    RemoveRemote(String),
+    /// Изменить имя и URL remote `name` (неизменённое не трогается).
+    EditRemote {
+        name: String,
+        new_name: String,
+        url: String,
+    },
     /// Спрятать все изменения рабочей копии.
     Stash {
         message: String,
@@ -502,6 +533,7 @@ pub struct RepoState {
     pub status: Option<RepoStatus>,
     pub refs: Vec<GitRef>,
     pub stashes: Vec<Stash>,
+    pub remotes: Vec<Remote>,
     pub history: Vec<Commit>,
     /// Раскладка графа для `history`, строка в строку.
     pub graph: CommitGraph,
@@ -791,21 +823,50 @@ pub fn tag_name_error(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Remote по умолчанию: `origin`, если есть, иначе первый из известных по remote-веткам.
+/// Имя remote: те же правила, что у веток.
+pub fn remote_name_error(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        Some("Введите имя remote")
+    } else {
+        branch_name_error(name)
+    }
+}
+
+/// Remote по умолчанию: `origin`, если есть, иначе первый настроенный
+/// (или известный по remote-веткам, пока список remotes не загружен).
 fn default_remote(repo: &RepoState) -> Result<&str, &'static str> {
-    let mut remotes = repo
+    let from_refs = repo
         .refs
         .iter()
         .filter(|r| r.kind == RefKind::RemoteBranch)
         .filter_map(|r| r.name.split_once('/').map(|(remote, _)| remote));
+    let mut remotes: Box<dyn Iterator<Item = &str>> = if repo.remotes.is_empty() {
+        Box::new(from_refs)
+    } else {
+        Box::new(repo.remotes.iter().map(|r| r.name.as_str()))
+    };
     let first = remotes
         .next()
-        .ok_or("У репозитория нет remote-веток: добавьте remote и сделайте fetch.")?;
+        .ok_or("У репозитория нет remotes: добавьте remote в списке слева.")?;
     Ok(if first == "origin" || remotes.any(|r| r == "origin") {
         "origin"
     } else {
         first
     })
+}
+
+/// Почему нельзя дать remote имя `name` и URL `url`; `editing` — имя изменяемого remote.
+fn remote_edit_error(repo: &RepoState, editing: Option<&str>, name: &str, url: &str) -> Option<String> {
+    if let Some(e) = remote_name_error(name) {
+        return Some(e.to_owned());
+    }
+    if editing != Some(name) && repo.remotes.iter().any(|r| r.name == name) {
+        return Some(format!("Remote {name} уже есть"));
+    }
+    if url.is_empty() {
+        return Some("Введите URL".into());
+    }
+    None
 }
 
 /// Задача push для текущей ветки: без upstream — `-u` на `origin` (или единственный remote).
@@ -1093,6 +1154,62 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 Action::Pull => {
                     repo.progress = Some(Progress::default());
                     spawn(Job::Pull)
+                }
+                Action::FetchRemote(_) if repo.progress.is_some() => vec![],
+                Action::FetchRemote(name) => {
+                    repo.progress = Some(Progress::default());
+                    spawn(Job::FetchRemote(name))
+                }
+                Action::AddRemote { name, url } => {
+                    let (name, url) = (name.trim().to_owned(), url.trim().to_owned());
+                    match remote_edit_error(repo, None, &name, &url) {
+                        Some(details) => {
+                            state.notifications.push(Notification {
+                                severity: Severity::Info,
+                                title: "Remote не добавлен".into(),
+                                details,
+                            });
+                            vec![]
+                        }
+                        None => spawn(Job::AddRemote { name, url }),
+                    }
+                }
+                Action::EditRemote { name, new_name, url } => {
+                    let (new_name, url) = (new_name.trim().to_owned(), url.trim().to_owned());
+                    let Some(old) = repo.remotes.iter().find(|r| r.name == name) else {
+                        return vec![];
+                    };
+                    let url_changed = url != old.url;
+                    match remote_edit_error(repo, Some(&name), &new_name, &url) {
+                        Some(details) => {
+                            state.notifications.push(Notification {
+                                severity: Severity::Info,
+                                title: "Remote не изменён".into(),
+                                details,
+                            });
+                            vec![]
+                        }
+                        None if new_name == name && !url_changed => vec![],
+                        None => spawn(Job::EditRemote {
+                            new_name: (new_name != name).then_some(new_name),
+                            url: url_changed.then_some(url),
+                            name,
+                        }),
+                    }
+                }
+                Action::RemoveRemote(name) => {
+                    if repo.remotes.iter().any(|r| r.name == name) {
+                        repo.confirm = Some(Confirm {
+                            title: format!("Удалить remote {name}?"),
+                            description: format!(
+                                "Удалятся настройки remote и его ветки {name}/… в этом репозитории. \
+                                 На сервере ничего не изменится; локальные ветки останутся."
+                            ),
+                            action: "Удалить".into(),
+                            job: Job::RemoveRemote(name),
+                        });
+                    }
+                    vec![]
                 }
                 Action::Push => match push_job(repo) {
                     Ok(job) => {
@@ -1508,6 +1625,7 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
             }
             r.stashes = stashes;
         }
+        JobResult::Remotes(Ok(remotes)) => r.remotes = remotes,
         JobResult::History(Ok(h)) => {
             r.history = h.commits;
             r.graph = h.graph;
@@ -1569,6 +1687,7 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
         JobResult::Status(Err(e))
         | JobResult::Refs(Err(e))
         | JobResult::Stashes(Err(e))
+        | JobResult::Remotes(Err(e))
         | JobResult::History(Err(e)) => error = Some(("Не удалось прочитать репозиторий".to_owned(), e)),
         JobResult::CloneProgress { .. } | JobResult::Cloned { .. } | JobResult::Prompt { .. } => {
             unreachable!("обработано выше")
@@ -2877,6 +2996,98 @@ mod tests {
             Job::Revert {
                 commit: "x".into(),
                 mainline: false
+            }
+        );
+    }
+
+    #[test]
+    fn remotes_add_edit_remove_and_default() {
+        let (mut s, id) = with_branches();
+        let remote = |name: &str, url: &str| Remote {
+            name: name.into(),
+            url: url.into(),
+            push_url: url.into(),
+        };
+        apply_result(
+            &mut s,
+            id,
+            JobResult::Remotes(Ok(vec![remote("fork", "f"), remote("origin", "o")])),
+        );
+        let spawned = |fx: Vec<Effect>| match &fx[..] {
+            [Effect::Spawn { job, .. }] => job.clone(),
+            other => panic!("unexpected {other:?}"),
+        };
+        let add = |name: &str, url: &str| Action::AddRemote {
+            name: name.into(),
+            url: url.into(),
+        };
+        assert_eq!(
+            spawned(reduce(&mut s, add(" up ", " /srv/a.git "))),
+            Job::AddRemote {
+                name: "up".into(),
+                url: "/srv/a.git".into()
+            }
+        );
+        assert!(reduce(&mut s, add("origin", "x")).is_empty());
+        assert!(reduce(&mut s, add("-v", "x")).is_empty());
+        assert!(reduce(&mut s, add("up", " ")).is_empty());
+        assert_eq!(s.notifications.len(), 3);
+
+        let edit = |name: &str, new_name: &str, url: &str| Action::EditRemote {
+            name: name.into(),
+            new_name: new_name.into(),
+            url: url.into(),
+        };
+        // Меняется только то, что изменили.
+        assert!(reduce(&mut s, edit("fork", "fork", "f")).is_empty());
+        assert_eq!(
+            spawned(reduce(&mut s, edit("fork", "mine", "f"))),
+            Job::EditRemote {
+                name: "fork".into(),
+                new_name: Some("mine".into()),
+                url: None
+            }
+        );
+        assert_eq!(
+            spawned(reduce(&mut s, edit("fork", "fork", "g"))),
+            Job::EditRemote {
+                name: "fork".into(),
+                new_name: None,
+                url: Some("g".into())
+            }
+        );
+        assert!(reduce(&mut s, edit("fork", "origin", "f")).is_empty());
+        assert!(reduce(&mut s, edit("nope", "x", "f")).is_empty());
+
+        assert!(reduce(&mut s, Action::RemoveRemote("fork".into())).is_empty());
+        assert_eq!(
+            spawned(reduce(&mut s, Action::Confirm(true))),
+            Job::RemoveRemote("fork".into())
+        );
+
+        assert_eq!(
+            spawned(reduce(&mut s, Action::FetchRemote("fork".into()))),
+            Job::FetchRemote("fork".into())
+        );
+        assert!(reduce(&mut s, Action::FetchRemote("fork".into())).is_empty());
+        apply_result(
+            &mut s,
+            id,
+            JobResult::Finished {
+                job: "fetch",
+                result: Ok(()),
+            },
+        );
+        assert_eq!(s.active_repo().unwrap().progress, None);
+
+        // Remote без веток (ещё не было fetch) — всё равно цель push.
+        let r = s.active_repo_mut().unwrap();
+        r.refs.retain(|r| r.kind != RefKind::RemoteBranch);
+        r.remotes = vec![remote("up", "u")];
+        assert_eq!(
+            spawned(reduce(&mut s, Action::Push)),
+            Job::Push {
+                set_upstream: Some(("up".into(), "main".into()))
             }
         );
     }

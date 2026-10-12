@@ -611,3 +611,66 @@ fn tags_cherry_pick_and_revert() {
     g.abort_operation(p, Operation::CherryPick, &c).unwrap();
     assert_eq!(g.status(p, &c).unwrap().operation, None);
 }
+
+#[test]
+fn remotes_add_fetch_edit_remove_and_push_tag() {
+    let server = TempRepo::new("remote-server");
+    let repo = TempRepo::new("remote-client");
+    let (g, c) = (git(), CancelToken::new());
+    let (s, p) = (server.path(), repo.path());
+    server.write("a.txt", "a\n");
+    g.stage(s, &["a.txt".into()], &c).unwrap();
+    g.commit(s, "init", false, &c).unwrap();
+
+    let url = s.to_string_lossy().into_owned();
+    g.add_remote(p, "up", &url, &c).unwrap();
+    let remotes = g.remotes(p, &c).unwrap();
+    assert_eq!(remotes.len(), 1);
+    assert_eq!(
+        (remotes[0].name.as_str(), remotes[0].url.as_str()),
+        ("up", url.as_str())
+    );
+    assert_eq!(remotes[0].push_url, url);
+
+    g.fetch_remote(p, "up", &c, &mut |_| {}).unwrap();
+    let names = |g: &Git| -> Vec<String> {
+        g.refs(p, &c)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.kind == RefKind::RemoteBranch)
+            .map(|r| r.name)
+            .collect()
+    };
+    assert_eq!(names(&g), ["up/main"]);
+
+    g.edit_remote(p, "up", Some("origin"), Some("/nowhere"), &c)
+        .unwrap();
+    let remotes = g.remotes(p, &c).unwrap();
+    assert_eq!(
+        (remotes[0].name.as_str(), remotes[0].url.as_str()),
+        ("origin", "/nowhere")
+    );
+    assert_eq!(names(&g), ["origin/main"]);
+    g.edit_remote(p, "origin", None, Some(&url), &c).unwrap();
+
+    // Тег уходит на remote: у сервера появляется refs/tags/v1.
+    g.switch_track(p, "origin/main", &c).unwrap();
+    let head = g.status(p, &c).unwrap().head.unwrap();
+    g.create_tag(p, "v1", &head, "", &c).unwrap();
+    g.push_tag(p, "origin", "v1", &c, &mut |_| {}).unwrap();
+    let server_tags: Vec<_> = g
+        .refs(s, &c)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.kind == RefKind::Tag)
+        .map(|r| (r.name, r.target))
+        .collect();
+    assert_eq!(server_tags, [("v1".to_owned(), head)]);
+
+    g.remove_remote(p, "origin", &c).unwrap();
+    assert!(g.remotes(p, &c).unwrap().is_empty());
+    assert!(names(&g).is_empty());
+    // Благодаря `--` имя с дефисом — имя, а не опция git (запрещает его уже core).
+    g.add_remote(p, "-v", &url, &c).unwrap();
+    assert_eq!(g.remotes(p, &c).unwrap()[0].name, "-v");
+}
