@@ -6,6 +6,7 @@
 mod executor;
 pub mod highlight;
 mod queue;
+pub mod session;
 mod watch;
 
 pub use executor::execute;

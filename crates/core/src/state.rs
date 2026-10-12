@@ -152,6 +152,9 @@ pub enum Action {
     Commit,
     DismissNotification(usize),
     SetSideBySide(bool),
+    SetDarkTheme(bool),
+    /// Восстановить вкладки и настройки прошлого запуска.
+    Restore(Session),
     /// Клонировать `url` в папку `dest` (её создаст git) и открыть результат.
     Clone {
         url: String,
@@ -411,13 +414,36 @@ pub struct AppState {
 pub struct Settings {
     /// Diff в две колонки вместо одной.
     pub side_by_side: bool,
+    pub dark: bool,
 }
+
+/// Что сохраняется между запусками: вкладки, недавние и настройки.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Session {
+    pub tabs: Vec<PathBuf>,
+    pub active: Option<usize>,
+    pub recent: Vec<PathBuf>,
+    pub settings: Settings,
+}
+
+/// Сколько недавних репозиториев помнить.
+pub const RECENT_LIMIT: usize = 20;
 
 impl AppState {
     pub fn new() -> Self {
         Self {
             history_limit: DEFAULT_HISTORY_LIMIT,
             ..Default::default()
+        }
+    }
+
+    /// Снимок для сохранения между запусками.
+    pub fn session(&self) -> Session {
+        Session {
+            tabs: self.tabs.iter().map(|r| r.path.clone()).collect(),
+            active: self.active,
+            recent: self.recent.iter().map(|e| e.path.clone()).collect(),
+            settings: self.settings.clone(),
         }
     }
 
@@ -470,6 +496,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             let id = RepoId(state.next_id);
             let name = repo_name(&path);
             state.recent.retain(|e| e.path != path);
+            state.recent.truncate(RECENT_LIMIT - 1);
             state.recent.insert(
                 0,
                 RepoEntry {
@@ -531,6 +558,29 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::SetSideBySide(on) => {
             state.settings.side_by_side = on;
             vec![]
+        }
+        Action::SetDarkTheme(on) => {
+            state.settings.dark = on;
+            vec![]
+        }
+        Action::Restore(session) => {
+            state.settings = session.settings;
+            let mut effects = vec![];
+            for path in session.tabs {
+                effects.extend(reduce(state, Action::OpenRepo(path)));
+            }
+            // Открытие вкладок двигает их в начало недавних — возвращаем сохранённый порядок.
+            state.recent = session
+                .recent
+                .into_iter()
+                .map(|path| RepoEntry {
+                    name: repo_name(&path),
+                    path,
+                })
+                .take(RECENT_LIMIT)
+                .collect();
+            state.active = session.active.filter(|&i| i < state.tabs.len());
+            effects
         }
         Action::DismissNotification(i) => {
             if i < state.notifications.len() {
@@ -1493,5 +1543,47 @@ mod tests {
         assert_eq!(s.cloning.as_ref().map(|c| c.id), Some(third));
         assert_eq!(s.notifications.len(), 1);
         assert!(s.tabs.is_empty());
+    }
+
+    #[test]
+    fn session_round_trip_keeps_tabs_recent_order_and_settings() {
+        let mut s = AppState::new();
+        open(&mut s, "/a");
+        open(&mut s, "/b");
+        open(&mut s, "/old");
+        reduce(&mut s, Action::CloseTab(2));
+        reduce(&mut s, Action::SelectTab(0));
+        reduce(&mut s, Action::SetSideBySide(true));
+        reduce(&mut s, Action::SetDarkTheme(true));
+        let session = s.session();
+        assert_eq!(session.tabs, [PathBuf::from("/a"), PathBuf::from("/b")]);
+        assert_eq!(session.active, Some(0));
+        let recent: Vec<_> = ["/old", "/b", "/a"].map(PathBuf::from).into();
+        assert_eq!(session.recent, recent);
+
+        let mut fresh = AppState::new();
+        let fx = reduce(&mut fresh, Action::Restore(session.clone()));
+        // Каждой вкладке — очередь и refresh.
+        assert_eq!(fx.len(), 4);
+        assert_eq!(fresh.session(), session);
+        assert_eq!(fresh.tabs[1].name, "b");
+        assert!(fresh.settings.dark && fresh.settings.side_by_side);
+    }
+
+    #[test]
+    fn restore_ignores_bad_active_index_and_recent_is_capped() {
+        let mut s = AppState::new();
+        let session = Session {
+            tabs: vec!["/a".into()],
+            active: Some(5),
+            recent: (0..RECENT_LIMIT + 5).map(|i| format!("/r{i}").into()).collect(),
+            settings: Settings::default(),
+        };
+        reduce(&mut s, Action::Restore(session));
+        assert_eq!(s.active, None);
+        assert_eq!(s.recent.len(), RECENT_LIMIT);
+        open(&mut s, "/new");
+        assert_eq!(s.recent.len(), RECENT_LIMIT);
+        assert_eq!(s.recent[0].path, PathBuf::from("/new"));
     }
 }

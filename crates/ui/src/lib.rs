@@ -10,10 +10,9 @@ use brancher_core::{Action, AppState, Severity};
 use egui::Ui;
 use widgets::Theme;
 
-/// Локальное состояние UI, которое не относится к модели (тексты полей ввода, тема).
+/// Локальное состояние UI, которое не относится к модели (тексты полей ввода).
 #[derive(Default)]
 pub struct BrancherUi {
-    pub dark: bool,
     welcome: welcome::Form,
 }
 
@@ -21,7 +20,11 @@ impl BrancherUi {
     /// Рисует окно целиком и возвращает действия пользователя за этот кадр.
     pub fn show(&mut self, ui: &mut Ui, state: &AppState) -> Vec<Action> {
         let ctx = ui.ctx().clone();
-        let theme = if self.dark { Theme::dark() } else { Theme::light() };
+        let theme = if state.settings.dark {
+            Theme::dark()
+        } else {
+            Theme::light()
+        };
         if Theme::installed(&ctx).as_ref() != Some(&theme) {
             theme.install(&ctx);
         }
@@ -68,7 +71,13 @@ impl BrancherUi {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(widgets::Switch::new(&mut self.dark).label("Тёмная тема"));
+                let mut dark = state.settings.dark;
+                if ui
+                    .add(widgets::Switch::new(&mut dark).label("Тёмная тема"))
+                    .changed()
+                {
+                    actions.push(Action::SetDarkTheme(dark));
+                }
             });
         });
     }
