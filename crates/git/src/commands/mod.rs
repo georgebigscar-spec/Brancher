@@ -6,6 +6,7 @@ pub mod clone;
 pub mod commit;
 pub mod diff;
 pub mod log;
+pub mod merge;
 pub mod progress;
 pub mod refs;
 pub mod remote;

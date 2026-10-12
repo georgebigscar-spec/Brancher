@@ -1,7 +1,7 @@
 //! Вкладка репозитория: ветки слева, история в центре, изменения и коммит справа.
 //! Граф коммитов рисует [`crate::graph`]; diff и blame — следующие шаги MVP.
 
-use brancher_core::{Action, Change, Commit, DiffTarget, RepoState, Settings};
+use brancher_core::{Action, Change, Commit, DiffTarget, Operation, RepoState, RepoStatus, Settings};
 use egui::{RichText, Ui};
 
 const ROW_HEIGHT: f32 = 24.0;
@@ -218,6 +218,10 @@ fn changes(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
     };
     let unstaged: Vec<&Change> = status.unstaged().collect();
     let staged: Vec<&Change> = status.staged().collect();
+    if let Some(op) = status.operation {
+        operation_banner(ui, status, op, actions);
+        ui.add_space(8.0);
+    }
 
     ui.horizontal(|ui| {
         ui.label(RichText::new(format!("Неиндексированные ({})", unstaged.len())).strong());
@@ -270,6 +274,44 @@ fn changes(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
     });
 }
 
+/// Идущий merge или rebase: сколько конфликтов осталось, «Продолжить» и «Прервать».
+fn operation_banner(ui: &mut Ui, status: &RepoStatus, op: Operation, actions: &mut Vec<Action>) {
+    let conflicts = status.conflicts().count();
+    let mut title = format!("Идёт {}", op.name());
+    if let Some((step, total)) = status.rebase_step {
+        title.push_str(&format!(", шаг {step} из {total}"));
+    }
+    let details = match conflicts {
+        0 => "Конфликты разрешены, можно продолжать.".to_owned(),
+        n => format!("Конфликтов: {n}. Правый клик по файлу: взять одну из версий или отметить решённым."),
+    };
+    let mut alert = widgets::Alert::new(title).description(details);
+    if conflicts > 0 {
+        alert = alert.destructive();
+    }
+    alert.show(ui);
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(conflicts == 0, widgets::Button::new("Продолжить"))
+            .clicked()
+        {
+            actions.push(Action::ContinueOperation);
+        }
+        if ui.add(widgets::Button::outline("Прервать…")).clicked() {
+            actions.push(Action::AbortOperation);
+        }
+    });
+}
+
+/// Подписи сторон конфликта: в rebase «наша» — ветка, на которую перебазируем.
+fn side_labels(op: Option<Operation>) -> (&'static str, &'static str) {
+    match op {
+        Some(Operation::Rebase) => ("Взять версию базы", "Взять версию своего коммита"),
+        Some(Operation::Merge) => ("Взять версию текущей ветки", "Взять версию сливаемой ветки"),
+        _ => ("Взять нашу версию", "Взять их версию"),
+    }
+}
+
 fn file_list(
     ui: &mut Ui,
     repo: &RepoState,
@@ -309,11 +351,30 @@ fn file_list(
                             staged,
                         });
                     }
-                    r.on_hover_text(if staged {
+                    let r = r.on_hover_text(if c.is_conflicted() {
+                        "Конфликт: правый клик — выбрать версию, двойной клик — отметить решённым"
+                    } else if staged {
                         "Клик — diff, двойной клик — unstage"
                     } else {
                         "Клик — diff, двойной клик — stage"
                     });
+                    if c.is_conflicted() {
+                        let (ours, theirs) = side_labels(repo.operation());
+                        widgets::context_menu(&r, 260.0, |ui| {
+                            for (label, ours) in [(ours, true), (theirs, false)] {
+                                if widgets::menu_item(ui, label, None).clicked() {
+                                    actions.push(Action::ResolveConflict {
+                                        path: c.path.clone(),
+                                        ours,
+                                    });
+                                }
+                            }
+                            widgets::menu_separator(ui);
+                            if widgets::menu_item(ui, "Отметить решённым", None).clicked() {
+                                actions.push(Action::Stage(vec![c.path.clone()]));
+                            }
+                        });
+                    }
                 });
                 if selected {
                     let rect = row.response.rect.expand2(egui::vec2(4.0, 0.0));

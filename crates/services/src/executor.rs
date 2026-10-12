@@ -49,6 +49,11 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
             Job::StashPush { message, untracked } => git.stash_push(repo, message, *untracked, cancel)?,
             Job::StashApply { index, id, pop } => git.stash_apply(repo, *index, id, *pop, cancel)?,
             Job::StashDrop { index, id } => git.stash_drop(repo, *index, id, cancel)?,
+            Job::Merge(target) => git.merge(repo, target, cancel)?,
+            Job::Rebase(onto) => git.rebase(repo, onto, cancel)?,
+            Job::Continue(op) => git.continue_operation(repo, *op, cancel)?,
+            Job::Abort(op) => git.abort_operation(repo, *op, cancel)?,
+            Job::ResolveConflict { path, ours } => git.resolve_with(repo, path, *ours, cancel)?,
             Job::Diff(target) => {
                 let diff = git.diff(repo, target, cancel).map(|mut files| {
                     crate::highlight::highlight(&mut files);

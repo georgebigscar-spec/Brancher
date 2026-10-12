@@ -38,6 +38,7 @@ pub fn args(target: &DiffTarget) -> Vec<String> {
         }
         DiffTarget::Change { untracked: true, .. } => vec!["diff".into(), "--no-index".into()],
         DiffTarget::Change { staged: true, .. } => vec!["diff".into(), "--cached".into()],
+        DiffTarget::Change { conflicted: true, .. } => vec!["diff".into(), "HEAD".into()],
         DiffTarget::Change { .. } => vec!["diff".into()],
     };
     a.extend(COMMON.map(String::from));
@@ -368,6 +369,7 @@ Binary files a/img.png and b/img.png differ
             path: "-x".into(),
             staged: false,
             untracked: true,
+            conflicted: false,
         };
         assert!(args(&untracked).ends_with(&["--".into(), "/dev/null".into(), "-x".into()]));
         assert_eq!(ok_codes(&untracked), [0, 1]);
@@ -375,6 +377,7 @@ Binary files a/img.png and b/img.png differ
             path: "x".into(),
             staged: true,
             untracked: false,
+            conflicted: false,
         };
         assert_eq!(args(&staged)[..2], ["diff", "--cached"]);
     }

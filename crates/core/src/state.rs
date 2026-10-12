@@ -71,6 +71,17 @@ pub enum Job {
         index: usize,
         id: Oid,
     },
+    /// Слить ветку (ссылку) в текущую.
+    Merge(String),
+    /// Перебазировать текущую ветку на ссылку.
+    Rebase(String),
+    Continue(Operation),
+    Abort(Operation),
+    /// Разрешить конфликт версией одной из сторон и отметить файл решённым.
+    ResolveConflict {
+        path: String,
+        ours: bool,
+    },
 }
 
 impl Job {
@@ -99,6 +110,21 @@ impl Job {
             Job::StashApply { pop: false, .. } => "stash apply",
             Job::StashApply { pop: true, .. } => "stash pop",
             Job::StashDrop { .. } => "stash drop",
+            Job::Merge(_) => "merge",
+            Job::Rebase(_) => "rebase",
+            Job::Continue(op) => match op {
+                Operation::Merge => "merge --continue",
+                Operation::Rebase => "rebase --continue",
+                Operation::CherryPick => "cherry-pick --continue",
+                Operation::Revert => "revert --continue",
+            },
+            Job::Abort(op) => match op {
+                Operation::Merge => "merge --abort",
+                Operation::Rebase => "rebase --abort",
+                Operation::CherryPick => "cherry-pick --abort",
+                Operation::Revert => "revert --abort",
+            },
+            Job::ResolveConflict { .. } => "resolve",
         }
     }
 
@@ -236,6 +262,18 @@ pub enum Action {
     PopStash(usize),
     /// Удалить запись (спрашивает подтверждение).
     DropStash(usize),
+    /// Слить ветку, тег или remote-ветку в текущую.
+    Merge(String),
+    /// Перебазировать текущую ветку на ссылку (спрашивает подтверждение).
+    Rebase(String),
+    /// Продолжить merge или rebase после разрешения конфликтов.
+    ContinueOperation,
+    /// Прервать merge или rebase (спрашивает подтверждение).
+    AbortOperation,
+    ResolveConflict {
+        path: String,
+        ours: bool,
+    },
     /// Отменить идущую сетевую задачу активной вкладки.
     CancelJob,
     /// Ответ на запрос git (первый в очереди); `None` — отмена.
@@ -403,9 +441,21 @@ impl RepoState {
         self.diff_anchor = None;
     }
 
-    /// Можно ли выбирать строки: только у diff файла рабочей копии, не у коммита.
+    /// Идущая операция git (merge, rebase…), если есть.
+    pub fn operation(&self) -> Option<Operation> {
+        self.status.as_ref().and_then(|s| s.operation)
+    }
+
+    /// Можно ли выбирать строки: только у diff файла рабочей копии, не у коммита и не у конфликта.
     pub fn can_select_lines(&self) -> bool {
-        matches!(self.diff_target, Some(DiffTarget::Change { .. })) && self.diff.is_some()
+        // У файла с конфликтом индекс не к чему применять: сначала выбирают версию.
+        matches!(
+            self.diff_target,
+            Some(DiffTarget::Change {
+                conflicted: false,
+                ..
+            })
+        ) && self.diff.is_some()
     }
 
     fn select_line(&mut self, at: (usize, usize, usize), extend: bool, toggle: bool) {
@@ -505,6 +555,7 @@ impl RepoState {
             path: path.to_owned(),
             staged,
             untracked: !staged && change.unstaged == Some(ChangeKind::Untracked),
+            conflicted: change.is_conflicted(),
         })
     }
 }
@@ -988,6 +1039,71 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     }
                     vec![]
                 }
+                Action::Merge(_) | Action::Rebase(_) if repo.operation().is_some() => {
+                    let op = repo.operation().map_or("", Operation::name);
+                    state.notifications.push(Notification {
+                        severity: Severity::Info,
+                        title: "Сначала завершите текущую операцию".into(),
+                        details: format!("Идёт {op}: продолжите или прервите его."),
+                    });
+                    vec![]
+                }
+                Action::Merge(target) => spawn(Job::Merge(target)),
+                Action::Rebase(onto) => {
+                    let branch = repo.status.as_ref().and_then(|s| s.branch.clone());
+                    match branch {
+                        Some(branch) => {
+                            repo.confirm = Some(Confirm {
+                                title: format!("Перебазировать {branch} на {onto}?"),
+                                description: format!(
+                                    "Коммиты {branch}, которых нет в {onto}, будут пересозданы поверх \
+                                     {onto}. Если ветка уже отправлена, потом понадобится push с force."
+                                ),
+                                action: "Перебазировать".into(),
+                                job: Job::Rebase(onto),
+                            });
+                        }
+                        None => state.notifications.push(Notification {
+                            severity: Severity::Info,
+                            title: "Rebase недоступен".into(),
+                            details: "HEAD не на ветке (detached).".into(),
+                        }),
+                    }
+                    vec![]
+                }
+                Action::ContinueOperation => match repo.operation() {
+                    Some(op) => {
+                        let conflicts = repo.status.as_ref().map_or(0, |s| s.conflicts().count());
+                        if conflicts > 0 {
+                            state.notifications.push(Notification {
+                                severity: Severity::Info,
+                                title: "Остались конфликты".into(),
+                                details: format!(
+                                    "Неразрешённых файлов: {conflicts}. Выберите версию или \
+                                     отметьте файл решённым (stage)."
+                                ),
+                            });
+                            vec![]
+                        } else {
+                            spawn(Job::Continue(op))
+                        }
+                    }
+                    None => vec![],
+                },
+                Action::AbortOperation => {
+                    if let Some(op) = repo.operation() {
+                        repo.confirm = Some(Confirm {
+                            title: format!("Прервать {}?", op.name()),
+                            description: "Репозиторий вернётся к состоянию до начала операции. \
+                                          Уже разрешённые конфликты будут потеряны."
+                                .into(),
+                            action: "Прервать".into(),
+                            job: Job::Abort(op),
+                        });
+                    }
+                    vec![]
+                }
+                Action::ResolveConflict { path, ours } => spawn(Job::ResolveConflict { path, ours }),
                 Action::Confirm(yes) => match repo.confirm.take() {
                     Some(c) if yes => {
                         repo.clear_selection();
@@ -1462,7 +1578,8 @@ mod tests {
                 job: Job::Diff(DiffTarget::Change {
                     path: "new.txt".into(),
                     staged: false,
-                    untracked: true
+                    untracked: true,
+                    conflicted: false,
                 })
             }]
         );
@@ -2180,5 +2297,79 @@ mod tests {
         let repo = s.active_repo().unwrap();
         assert!(repo.diff_target.is_none());
         assert_eq!(repo.stashes.len(), 1);
+    }
+
+    #[test]
+    fn merge_rebase_and_conflicts() {
+        let mut s = AppState::new();
+        let id = open(&mut s, "/a");
+        let spawned = |fx: Vec<Effect>| match &fx[..] {
+            [Effect::Spawn { job, .. }] => job.clone(),
+            other => panic!("unexpected {other:?}"),
+        };
+        let set = |s: &mut AppState, op: Option<Operation>, changes: Vec<Change>| {
+            let status = RepoStatus {
+                branch: Some("main".into()),
+                changes,
+                operation: op,
+                ..Default::default()
+            };
+            apply_result(s, id, JobResult::Status(Ok(status)));
+        };
+        set(&mut s, None, vec![]);
+        assert_eq!(
+            spawned(reduce(&mut s, Action::Merge("dev".into()))),
+            Job::Merge("dev".into())
+        );
+        // Rebase — после подтверждения.
+        assert!(reduce(&mut s, Action::Rebase("dev".into())).is_empty());
+        assert!(s
+            .active_repo()
+            .unwrap()
+            .confirm
+            .as_ref()
+            .unwrap()
+            .title
+            .contains("main на dev"));
+        assert_eq!(
+            spawned(reduce(&mut s, Action::Confirm(true))),
+            Job::Rebase("dev".into())
+        );
+
+        // Во время merge новый merge не начинается, а продолжить нельзя, пока есть конфликты.
+        let conflict = Change {
+            path: "a".into(),
+            orig_path: None,
+            staged: Some(ChangeKind::Unmerged),
+            unstaged: Some(ChangeKind::Unmerged),
+        };
+        set(&mut s, Some(Operation::Merge), vec![conflict]);
+        let notes = s.notifications.len();
+        assert!(reduce(&mut s, Action::Merge("x".into())).is_empty());
+        assert!(reduce(&mut s, Action::ContinueOperation).is_empty());
+        assert_eq!(s.notifications.len(), notes + 2);
+        assert_eq!(
+            spawned(reduce(
+                &mut s,
+                Action::ResolveConflict {
+                    path: "a".into(),
+                    ours: true
+                }
+            )),
+            Job::ResolveConflict {
+                path: "a".into(),
+                ours: true
+            }
+        );
+        set(&mut s, Some(Operation::Merge), vec![]);
+        assert_eq!(
+            spawned(reduce(&mut s, Action::ContinueOperation)),
+            Job::Continue(Operation::Merge)
+        );
+        assert!(reduce(&mut s, Action::AbortOperation).is_empty());
+        assert_eq!(
+            spawned(reduce(&mut s, Action::Confirm(true))),
+            Job::Abort(Operation::Merge)
+        );
     }
 }

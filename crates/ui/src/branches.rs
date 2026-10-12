@@ -40,8 +40,9 @@ pub fn refs(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
             ("Теги", RefKind::Tag),
         ] {
             ui.label(RichText::new(title).strong());
+            let current = repo.status.as_ref().and_then(|s| s.branch.as_deref());
             for r in repo.refs.iter().filter(|r| r.kind == kind) {
-                ref_row(ui, r, actions);
+                ref_row(ui, r, current, actions);
             }
             ui.add_space(8.0);
         }
@@ -49,7 +50,7 @@ pub fn refs(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
     });
 }
 
-fn ref_row(ui: &mut Ui, r: &GitRef, actions: &mut Vec<Action>) {
+fn ref_row(ui: &mut Ui, r: &GitRef, current: Option<&str>, actions: &mut Vec<Action>) {
     let mut text = r.name.clone();
     if r.ahead > 0 || r.behind > 0 {
         text.push_str(&format!("  ↑{} ↓{}", r.ahead, r.behind));
@@ -81,6 +82,16 @@ fn ref_row(ui: &mut Ui, r: &GitRef, actions: &mut Vec<Action>) {
         }
         if widgets::menu_item(ui, "Создать ветку отсюда…", None).clicked() {
             open_new_branch(ui.ctx(), r.full_name.clone(), r.name.clone());
+        }
+        if let (Some(current), false) = (current, r.is_head) {
+            widgets::menu_separator(ui);
+            if widgets::menu_item(ui, &format!("Слить в {current}"), None).clicked() {
+                actions.push(Action::Merge(r.name.clone()));
+            }
+            if widgets::menu_item(ui, &format!("Перебазировать {current} на {}…", r.name), None).clicked()
+            {
+                actions.push(Action::Rebase(r.name.clone()));
+            }
         }
         if r.kind == RefKind::LocalBranch && !r.is_head {
             widgets::menu_separator(ui);
