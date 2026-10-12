@@ -116,6 +116,42 @@ impl Git {
         self.run_args(repo, &args, Some(message.as_bytes()), cancel)
     }
 
+    pub fn switch(&self, repo: &Path, branch: &str, cancel: &CancelToken) -> Result<(), GitError> {
+        self.run_args(repo, &commands::branch::switch_args(branch), None, cancel)
+    }
+
+    pub fn switch_track(
+        &self,
+        repo: &Path,
+        remote_branch: &str,
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        let args = commands::branch::switch_track_args(remote_branch);
+        self.run_args(repo, &args, None, cancel)
+    }
+
+    pub fn create_branch(
+        &self,
+        repo: &Path,
+        name: &str,
+        start: &str,
+        checkout: bool,
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        let args = commands::branch::create_args(name, start, checkout);
+        self.run_args(repo, &args, None, cancel)
+    }
+
+    pub fn delete_branch(
+        &self,
+        repo: &Path,
+        name: &str,
+        force: bool,
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        self.run_args(repo, &commands::branch::delete_args(name, force), None, cancel)
+    }
+
     /// Клонирует `url` в `dest`, передавая этапы прогресса в `on_progress`.
     pub fn clone_repo(
         &self,

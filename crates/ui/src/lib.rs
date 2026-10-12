@@ -1,6 +1,7 @@
 //! UI: функция от состояния. Рисует [`AppState`] и возвращает [`Action`]-ы — ничего не
 //! запускает и не читает с диска (раздел 3, правило потоков).
 
+mod branches;
 mod diff_view;
 mod graph;
 mod repo_view;

@@ -182,6 +182,20 @@ pub fn dropdown_menu<R>(
         .map(|r| r.inner)
 }
 
+/// `<ContextMenu>`: the same menu as [`dropdown_menu`], opened by a secondary click
+/// (or long press) on `target`.
+pub fn context_menu<R>(target: &Response, width: f32, add_contents: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    let t = Theme::get(&target.ctx);
+    Popup::context_menu(target)
+        .width(width)
+        .frame(t.popover_frame())
+        .show(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            add_contents(ui)
+        })
+        .map(|r| r.inner)
+}
+
 /// A clickable menu entry; closes the menu when clicked.
 pub fn menu_item(ui: &mut Ui, text: &str, shortcut: Option<&str>) -> Response {
     let r = menu_row(ui, text, shortcut, false);
