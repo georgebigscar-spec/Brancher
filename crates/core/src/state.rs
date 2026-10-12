@@ -25,9 +25,11 @@ pub enum Job {
         amend: bool,
     },
     Diff(DiffTarget),
-    /// Частичный stage (`reverse = false`) или unstage выбранных строк.
+    /// `git apply`: частичный stage (`cached`), unstage (`cached` + `reverse`)
+    /// или discard в рабочем дереве (только `reverse`).
     ApplyPatch {
         patch: String,
+        cached: bool,
         reverse: bool,
     },
 }
@@ -45,6 +47,7 @@ impl Job {
             Job::Unstage(_) => "unstage",
             Job::Commit { .. } => "commit",
             Job::Diff(_) => "diff",
+            Job::ApplyPatch { cached: false, .. } => "discard-lines",
             Job::ApplyPatch { reverse: false, .. } => "stage-lines",
             Job::ApplyPatch { reverse: true, .. } => "unstage-lines",
         }
@@ -114,6 +117,15 @@ pub enum Action {
         file: usize,
         hunk: usize,
     },
+    /// Отменить выбранные строки в рабочем дереве (после подтверждения).
+    DiscardDiffSelection,
+    /// Отменить ханк в рабочем дереве (после подтверждения).
+    DiscardHunk {
+        file: usize,
+        hunk: usize,
+    },
+    /// Ответ на диалог подтверждения: `true` — выполнить.
+    Confirm(bool),
     Stage(Vec<String>),
     StageAll,
     Unstage(Vec<String>),
@@ -154,6 +166,15 @@ pub struct Notification {
 
 pub const DEFAULT_HISTORY_LIMIT: usize = 20_000;
 
+/// Вопрос перед необратимым действием (раздел 1: потеря данных — только с подтверждением).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Confirm {
+    pub title: String,
+    pub description: String,
+    pub action: String,
+    pub job: Job,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RepoState {
     pub id: Option<RepoId>,
@@ -173,6 +194,8 @@ pub struct RepoState {
     pub diff_selection: BTreeSet<(usize, usize, usize)>,
     /// Строка последнего клика — начало диапазона для Shift+клик.
     pub diff_anchor: Option<(usize, usize, usize)>,
+    /// Необратимое действие, которое ждёт подтверждения в диалоге.
+    pub confirm: Option<Confirm>,
     pub commit_message: String,
     pub amend: bool,
     /// Сколько задач сейчас выполняется.
@@ -253,10 +276,20 @@ impl RepoState {
     }
 
     /// Patch для выбранных строк; направление — по стороне diff (индекс → unstage).
-    fn apply_lines(&self, selection: &BTreeSet<(usize, usize, usize)>) -> Result<Job, patch::PatchError> {
+    /// `discard` — откатить выбранное в рабочем дереве (только для неиндексированного diff).
+    fn apply_lines(
+        &self,
+        selection: &BTreeSet<(usize, usize, usize)>,
+        discard: bool,
+    ) -> Result<Job, patch::PatchError> {
         let (Some(diff), Some(DiffTarget::Change { staged, .. })) = (&self.diff, &self.diff_target) else {
             return Err(patch::PatchError::NothingSelected);
         };
+        if discard && *staged {
+            return Err(patch::PatchError::NothingSelected);
+        }
+        // Discard откатывает изменения рабочего дерева так же, как unstage — индекса.
+        let reverse = *staged || discard;
         let mut text = String::new();
         for (f, file) in diff.files.iter().enumerate() {
             let lines: BTreeSet<LineRef> = selection
@@ -267,14 +300,15 @@ impl RepoState {
             if lines.is_empty() {
                 continue;
             }
-            text.push_str(&patch::build(file, &lines, *staged)?);
+            text.push_str(&patch::build(file, &lines, reverse)?);
         }
         if text.is_empty() {
             return Err(patch::PatchError::NothingSelected);
         }
         Ok(Job::ApplyPatch {
             patch: text,
-            reverse: *staged,
+            cached: !discard,
+            reverse,
         })
     }
 
@@ -454,9 +488,13 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     repo.select_line((file, hunk, line), extend, toggle);
                     vec![]
                 }
-                Action::ApplyDiffSelection | Action::ApplyHunk { .. } => {
+                Action::ApplyDiffSelection
+                | Action::ApplyHunk { .. }
+                | Action::DiscardDiffSelection
+                | Action::DiscardHunk { .. } => {
+                    let discard = matches!(action, Action::DiscardDiffSelection | Action::DiscardHunk { .. });
                     let selection = match action {
-                        Action::ApplyHunk { file, hunk } => {
+                        Action::ApplyHunk { file, hunk } | Action::DiscardHunk { file, hunk } => {
                             match repo.diff.as_ref().and_then(|d| d.files.get(file)) {
                                 Some(f) if hunk < f.hunks.len() => patch::hunk_lines(f, hunk)
                                     .into_iter()
@@ -467,21 +505,50 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                         }
                         _ => repo.diff_selection.clone(),
                     };
-                    match repo.apply_lines(&selection) {
+                    match repo.apply_lines(&selection, discard) {
+                        Ok(job) if discard => {
+                            let path = match &repo.diff_target {
+                                Some(DiffTarget::Change { path, .. }) => path.clone(),
+                                _ => String::new(),
+                            };
+                            let n = selection.len();
+                            repo.confirm = Some(Confirm {
+                                title: "Отменить изменения?".into(),
+                                description: format!(
+                                    "Изменённых строк: {n} в {path}. Они будут удалены из рабочей копии, \
+                                     вернуть их через Git не получится."
+                                ),
+                                action: "Отменить изменения".into(),
+                                job,
+                            });
+                            vec![]
+                        }
                         Ok(job) => {
                             repo.clear_selection();
                             spawn(job)
                         }
                         Err(e) => {
+                            let title = if discard {
+                                "Отмена строк недоступна"
+                            } else {
+                                "Частичный stage недоступен"
+                            };
                             state.notifications.push(Notification {
                                 severity: Severity::Info,
-                                title: "Частичный stage недоступен".into(),
+                                title: title.into(),
                                 details: e.to_string(),
                             });
                             vec![]
                         }
                     }
                 }
+                Action::Confirm(yes) => match repo.confirm.take() {
+                    Some(c) if yes => {
+                        repo.clear_selection();
+                        spawn(c.job)
+                    }
+                    _ => vec![],
+                },
                 Action::CloseDiff => {
                     repo.close_diff();
                     repo.selected_commit = None;
@@ -996,7 +1063,12 @@ mod tests {
         click(&mut s, 3, false, false);
         let fx = reduce(&mut s, Action::ApplyDiffSelection);
         let Effect::Spawn {
-            job: Job::ApplyPatch { patch, reverse },
+            job:
+                Job::ApplyPatch {
+                    patch,
+                    cached: true,
+                    reverse,
+                },
             ..
         } = &fx[0]
         else {
@@ -1031,6 +1103,46 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn discard_asks_for_confirmation_first() {
+        let (mut s, id) = with_change_diff(false);
+        click(&mut s, 2, false, false);
+        assert!(reduce(&mut s, Action::DiscardDiffSelection).is_empty());
+        let confirm = s
+            .active_repo()
+            .unwrap()
+            .confirm
+            .clone()
+            .expect("диалог подтверждения");
+        assert!(confirm.description.contains("f.txt"));
+        let Job::ApplyPatch {
+            cached,
+            reverse,
+            ref patch,
+        } = confirm.job
+        else {
+            panic!()
+        };
+        assert_eq!((cached, reverse), (false, true));
+        // Невыбранная строка `c` есть в рабочем дереве — остаётся контекстом.
+        assert!(patch.ends_with("@@ -1,2 +1,3 @@\n a\n+B\n c\n"), "{patch}");
+
+        // Отказ ничего не запускает, согласие — запускает ровно этот patch.
+        assert!(reduce(&mut s, Action::Confirm(false)).is_empty());
+        assert!(s.active_repo().unwrap().confirm.is_none());
+        reduce(&mut s, Action::DiscardHunk { file: 0, hunk: 0 });
+        let job = s.active_repo().unwrap().confirm.clone().unwrap().job;
+        assert_eq!(
+            reduce(&mut s, Action::Confirm(true)),
+            vec![Effect::Spawn { repo: id, job }]
+        );
+
+        // В diff индекса discard недоступен.
+        let (mut s, _) = with_change_diff(true);
+        reduce(&mut s, Action::DiscardHunk { file: 0, hunk: 0 });
+        assert!(s.active_repo().unwrap().confirm.is_none());
     }
 
     #[test]

@@ -363,14 +363,36 @@ pub fn alert_dialog(
     description: &str,
     action: &str,
 ) -> Option<bool> {
+    confirm_dialog(ctx, id_salt, title, description, action, "Cancel", false)
+}
+
+/// Like [`alert_dialog`], with a custom cancel label and an optional destructive
+/// action button (`<AlertDialogAction className="bg-destructive">`).
+/// Enter confirms (except for destructive actions), Escape cancels.
+pub fn confirm_dialog(
+    ctx: &Context,
+    id_salt: impl egui::AsId,
+    title: &str,
+    description: &str,
+    action: &str,
+    cancel: &str,
+    destructive: bool,
+) -> Option<bool> {
     let resp = Dialog::new(id_salt, title)
         .description(description)
         .show(ctx, |ui| {
             footer(ui, |ui| {
-                if ui.add(Button::new(action)).clicked() {
+                let button = if destructive {
+                    Button::destructive(action)
+                } else {
+                    Button::new(action)
+                };
+                // Необратимое действие не подтверждается случайным Enter.
+                let enter = !destructive && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.add(button).clicked() || enter {
                     return Some(true);
                 }
-                if ui.add(Button::outline("Cancel")).clicked() {
+                if ui.add(Button::outline(cancel)).clicked() {
                     return Some(false);
                 }
                 None

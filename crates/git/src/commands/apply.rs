@@ -1,10 +1,13 @@
-//! `git apply --cached`: частичный stage и unstage по patch из stdin.
+//! `git apply` patch из stdin: частичный stage/unstage (`--cached`) и discard
+//! (обратное применение к рабочему дереву).
 
-/// `reverse` — снять изменения из индекса (unstage).
-pub fn args(reverse: bool) -> Vec<String> {
-    let mut a: Vec<String> = ["apply", "--cached", "--whitespace=nowarn"]
-        .map(String::from)
-        .into();
+/// `cached` — применять к индексу, иначе к рабочему дереву; `reverse` — откатить patch.
+pub fn args(cached: bool, reverse: bool) -> Vec<String> {
+    let mut a: Vec<String> = vec!["apply".into()];
+    if cached {
+        a.push("--cached".into());
+    }
+    a.push("--whitespace=nowarn".into());
     if reverse {
         a.push("--reverse".into());
     }
@@ -18,10 +21,17 @@ mod tests {
 
     #[test]
     fn patch_comes_from_stdin() {
-        assert_eq!(args(false), ["apply", "--cached", "--whitespace=nowarn", "-"]);
         assert_eq!(
-            args(true),
+            args(true, false),
+            ["apply", "--cached", "--whitespace=nowarn", "-"]
+        );
+        assert_eq!(
+            args(true, true),
             ["apply", "--cached", "--whitespace=nowarn", "--reverse", "-"]
+        );
+        assert_eq!(
+            args(false, true),
+            ["apply", "--whitespace=nowarn", "--reverse", "-"]
         );
     }
 }
