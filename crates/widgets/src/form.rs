@@ -3,8 +3,8 @@
 use std::ops::RangeInclusive;
 
 use egui::{
-    Color32, CornerRadius, CursorIcon, FontId, Frame, Key, Margin, Pos2, Rect, Response, RichText,
-    Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2, Widget, WidgetInfo, WidgetType,
+    Color32, CornerRadius, CursorIcon, FontId, Frame, Key, Margin, Pos2, Rect, Response, RichText, Sense,
+    Stroke, StrokeKind, TextEdit, Ui, Vec2, Widget, WidgetInfo, WidgetType,
 };
 
 use crate::basic::paint_check;
@@ -24,7 +24,13 @@ pub struct Input<'t> {
 
 impl<'t> Input<'t> {
     pub fn new(text: &'t mut String) -> Self {
-        Self { text, placeholder: String::new(), password: false, width: None, invalid: false }
+        Self {
+            text,
+            placeholder: String::new(),
+            password: false,
+            width: None,
+            invalid: false,
+        }
     }
     pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
         self.placeholder = placeholder.into();
@@ -47,7 +53,11 @@ impl<'t> Input<'t> {
 
 fn input_frame(t: &Theme, invalid: bool) -> Frame {
     Frame::new()
-        .fill(if t.dark { t.input.gamma_multiply(0.3) } else { Color32::TRANSPARENT })
+        .fill(if t.dark {
+            t.input.gamma_multiply(0.3)
+        } else {
+            Color32::TRANSPARENT
+        })
         .stroke(Stroke::new(1.0, if invalid { t.destructive } else { t.input }))
         .corner_radius(t.radius_md())
         .inner_margin(Margin::symmetric(12, 8))
@@ -94,7 +104,12 @@ pub struct Textarea<'t> {
 
 impl<'t> Textarea<'t> {
     pub fn new(text: &'t mut String) -> Self {
-        Self { text, placeholder: String::new(), rows: 3, width: None }
+        Self {
+            text,
+            placeholder: String::new(),
+            rows: 3,
+            width: None,
+        }
     }
     pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
         self.placeholder = placeholder.into();
@@ -194,7 +209,13 @@ impl Widget for Checkbox<'_> {
         let p = ui.painter();
         let radius = CornerRadius::same(4);
         if *self.checked {
-            p.rect(rect, radius, t.primary, Stroke::new(1.0, t.primary), StrokeKind::Inside);
+            p.rect(
+                rect,
+                radius,
+                t.primary,
+                Stroke::new(1.0, t.primary),
+                StrokeKind::Inside,
+            );
             paint_check(p, rect.shrink(2.0), t.primary_foreground, 1.6);
         } else {
             p.rect_stroke(rect, radius, Stroke::new(1.0, t.input), StrokeKind::Inside);
@@ -241,15 +262,16 @@ impl Widget for Switch<'_> {
         }
         let k = ui.ctx().animate_bool_responsive(response.id, *self.on);
         let p = ui.painter();
-        let off_track = if t.dark { t.input.gamma_multiply(0.8) } else { t.input };
+        let off_track = if t.dark {
+            t.input.gamma_multiply(0.8)
+        } else {
+            t.input
+        };
         let track = crate::theme::mix(off_track, t.primary, k);
         let radius = CornerRadius::same((rect.height() / 2.0) as u8);
         p.rect_filled(rect, radius, track);
         let thumb_r = 8.0;
-        let x = egui::lerp(
-            (rect.left() + 1.0 + thumb_r)..=(rect.right() - 1.0 - thumb_r),
-            k,
-        );
+        let x = egui::lerp((rect.left() + 1.0 + thumb_r)..=(rect.right() - 1.0 - thumb_r), k);
         let thumb = if t.dark {
             crate::theme::mix(t.foreground, t.primary_foreground, k)
         } else {
@@ -276,7 +298,11 @@ pub struct RadioItem<'a, T: PartialEq> {
 
 impl<'a, T: PartialEq> RadioItem<'a, T> {
     pub fn new(current: &'a mut T, value: T, label: impl Into<String>) -> Self {
-        Self { current, value, label: label.into() }
+        Self {
+            current,
+            value,
+            label: label.into(),
+        }
     }
 }
 
@@ -307,11 +333,7 @@ impl<T: PartialEq> Widget for RadioItem<'_, T> {
 }
 
 /// A vertical `<RadioGroup>` over `(value, label)` pairs.
-pub fn radio_group<T: PartialEq + Clone>(
-    ui: &mut Ui,
-    current: &mut T,
-    options: &[(T, &str)],
-) -> Response {
+pub fn radio_group<T: PartialEq + Clone>(ui: &mut Ui, current: &mut T, options: &[(T, &str)]) -> Response {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 12.0;
         let mut response: Option<Response> = None;
@@ -340,7 +362,12 @@ pub struct Slider<'a> {
 
 impl<'a> Slider<'a> {
     pub fn new(value: &'a mut f32, range: RangeInclusive<f32>) -> Self {
-        Self { value, range, step: None, width: None }
+        Self {
+            value,
+            range,
+            step: None,
+            width: None,
+        }
     }
     pub fn step(mut self, step: f32) -> Self {
         self.step = Some(step);
@@ -356,8 +383,7 @@ impl Widget for Slider<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let t = Theme::get(ui.ctx());
         let width = self.width.unwrap_or_else(|| ui.available_width());
-        let (rect, mut response) =
-            ui.allocate_exact_size(Vec2::new(width, 20.0), Sense::click_and_drag());
+        let (rect, mut response) = ui.allocate_exact_size(Vec2::new(width, 20.0), Sense::click_and_drag());
         response.widget_info(|| WidgetInfo::slider(ui.is_enabled(), *self.value as f64, ""));
         let thumb_r = 8.0;
         let track = Rect::from_center_size(rect.center(), Vec2::new(width - 2.0 * thumb_r, 6.0));
@@ -377,9 +403,8 @@ impl Widget for Slider<'_> {
         }
         if response.has_focus() {
             let step = self.step.unwrap_or((max - min) / 100.0);
-            let delta = ui.input(|i| {
-                i.num_presses(Key::ArrowRight) as f32 - i.num_presses(Key::ArrowLeft) as f32
-            });
+            let delta =
+                ui.input(|i| i.num_presses(Key::ArrowRight) as f32 - i.num_presses(Key::ArrowLeft) as f32);
             if delta != 0.0 {
                 *self.value = snap(*self.value + delta * step);
             }
@@ -391,9 +416,17 @@ impl Widget for Slider<'_> {
         let p = ui.painter();
         let full = CornerRadius::same(3);
         p.rect_filled(track, full, t.muted);
-        let k = if max > min { (*self.value - min) / (max - min) } else { 0.0 };
+        let k = if max > min {
+            (*self.value - min) / (max - min)
+        } else {
+            0.0
+        };
         let x = track.left() + track.width() * k;
-        p.rect_filled(Rect::from_min_max(track.min, Pos2::new(x, track.max.y)), full, t.primary);
+        p.rect_filled(
+            Rect::from_min_max(track.min, Pos2::new(x, track.max.y)),
+            full,
+            t.primary,
+        );
         let center = Pos2::new(x, rect.center().y);
         if response.hovered() || response.has_focus() || response.dragged() {
             p.circle_filled(center, thumb_r + 4.0, t.ring_soft());
@@ -419,7 +452,11 @@ pub struct Toggle<'a> {
 
 impl<'a> Toggle<'a> {
     pub fn new(on: &'a mut bool, text: impl Into<String>) -> Self {
-        Self { on, text: text.into(), outline: false }
+        Self {
+            on,
+            text: text.into(),
+            outline: false,
+        }
     }
     pub fn outline(mut self) -> Self {
         self.outline = true;
@@ -437,9 +474,19 @@ fn paint_toggle_face(ui: &Ui, rect: Rect, text: &str, on: bool, hovered: bool, o
     } else {
         Color32::TRANSPARENT
     };
-    let stroke = if outline { Stroke::new(1.0, t.input) } else { Stroke::NONE };
+    let stroke = if outline {
+        Stroke::new(1.0, t.input)
+    } else {
+        Stroke::NONE
+    };
     p.rect(rect, t.radius_md(), fill, stroke, StrokeKind::Inside);
-    let fg = if on { t.accent_foreground } else if hovered { t.muted_foreground } else { t.foreground };
+    let fg = if on {
+        t.accent_foreground
+    } else if hovered {
+        t.muted_foreground
+    } else {
+        t.foreground
+    };
     let g = p.layout_no_wrap(text.to_owned(), FontId::proportional(14.0), fg);
     p.galley(rect.center() - g.size() / 2.0, g, fg);
 }
@@ -453,9 +500,8 @@ impl Widget for Toggle<'_> {
         );
         let size = Vec2::new((g.size().x + 16.0).max(36.0), 36.0);
         let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
-        response.widget_info(|| {
-            WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), *self.on, &self.text)
-        });
+        response
+            .widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), *self.on, &self.text));
         if response.clicked() {
             *self.on = !*self.on;
             response.mark_changed();
@@ -476,7 +522,9 @@ pub fn toggle_group(ui: &mut Ui, selected: &mut usize, items: &[&str]) -> Respon
     let widths: Vec<f32> = items
         .iter()
         .map(|s| {
-            let g = ui.painter().layout_no_wrap(s.to_string(), font.clone(), Color32::PLACEHOLDER);
+            let g = ui
+                .painter()
+                .layout_no_wrap(s.to_string(), font.clone(), Color32::PLACEHOLDER);
             (g.size().x + 20.0).max(36.0)
         })
         .collect();
@@ -516,6 +564,7 @@ pub fn toggle_group(ui: &mut Ui, selected: &mut usize, items: &[&str]) -> Respon
             p.vline(item.left(), item.y_range(), Stroke::new(1.0, t.input));
         }
     }
-    ui.painter().rect_stroke(rect, r, Stroke::new(1.0, t.input), StrokeKind::Inside);
+    ui.painter()
+        .rect_stroke(rect, r, Stroke::new(1.0, t.input), StrokeKind::Inside);
     response
 }

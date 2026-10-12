@@ -1,8 +1,7 @@
 //! Small display components: Badge, Label, Separator, Kbd, Skeleton, Progress, Avatar.
 
 use egui::{
-    Color32, CornerRadius, FontId, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
-    Widget,
+    Color32, CornerRadius, FontId, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, Widget,
 };
 
 use crate::theme::Theme;
@@ -27,7 +26,10 @@ pub struct Badge {
 
 impl Badge {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into(), variant: BadgeVariant::Default }
+        Self {
+            text: text.into(),
+            variant: BadgeVariant::Default,
+        }
     }
     pub fn variant(mut self, variant: BadgeVariant) -> Self {
         self.variant = variant;
@@ -53,12 +55,16 @@ impl Widget for Badge {
             BadgeVariant::Destructive => (t.destructive, t.destructive_foreground, Stroke::NONE),
             BadgeVariant::Outline => (Color32::TRANSPARENT, t.foreground, Stroke::new(1.0, t.border)),
         };
-        let galley = ui.painter().layout_no_wrap(self.text, FontId::proportional(12.0), fg);
+        let galley = ui
+            .painter()
+            .layout_no_wrap(self.text, FontId::proportional(12.0), fg);
         let size = galley.size() + Vec2::new(16.0, 6.0);
         let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
         if ui.is_rect_visible(rect) {
-            ui.painter().rect(rect, t.radius_md(), fill, stroke, StrokeKind::Inside);
-            ui.painter().galley(rect.center() - galley.size() / 2.0, galley, fg);
+            ui.painter()
+                .rect(rect, t.radius_md(), fill, stroke, StrokeKind::Inside);
+            ui.painter()
+                .galley(rect.center() - galley.size() / 2.0, galley, fg);
         }
         response
     }
@@ -119,7 +125,8 @@ pub fn kbd(ui: &mut Ui, keys: impl Into<String>) -> Response {
     let size = Vec2::new((galley.size().x + 8.0).max(20.0), 20.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter().rect_filled(rect, t.radius_sm(), t.muted);
-    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, t.muted_foreground);
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, t.muted_foreground);
     response
 }
 
@@ -134,11 +141,17 @@ pub struct Skeleton {
 
 impl Skeleton {
     pub fn new(size: impl Into<Vec2>) -> Self {
-        Self { size: size.into(), round: false }
+        Self {
+            size: size.into(),
+            round: false,
+        }
     }
     /// `rounded-full`, for avatar placeholders.
     pub fn circle(diameter: f32) -> Self {
-        Self { size: Vec2::splat(diameter), round: true }
+        Self {
+            size: Vec2::splat(diameter),
+            round: true,
+        }
     }
 }
 
@@ -153,7 +166,8 @@ impl Widget for Skeleton {
         } else {
             t.radius_md()
         };
-        ui.painter().rect_filled(rect, radius, t.accent.gamma_multiply(pulse));
+        ui.painter()
+            .rect_filled(rect, radius, t.accent.gamma_multiply(pulse));
         ui.ctx().request_repaint();
         response
     }
@@ -170,7 +184,10 @@ pub struct Progress {
 
 impl Progress {
     pub fn new(fraction: f32) -> Self {
-        Self { fraction: fraction.clamp(0.0, 1.0), width: None }
+        Self {
+            fraction: fraction.clamp(0.0, 1.0),
+            width: None,
+        }
     }
     pub fn width(mut self, width: f32) -> Self {
         self.width = Some(width);
@@ -184,10 +201,9 @@ impl Widget for Progress {
         let width = self.width.unwrap_or_else(|| ui.available_width());
         let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 8.0), Sense::hover());
         let radius = CornerRadius::same(4);
-        ui.painter().rect_filled(rect, radius, t.primary.gamma_multiply(0.2));
-        let shown = ui
-            .ctx()
-            .animate_value_with_time(response.id, self.fraction, 0.3);
+        ui.painter()
+            .rect_filled(rect, radius, t.primary.gamma_multiply(0.2));
+        let shown = ui.ctx().animate_value_with_time(response.id, self.fraction, 0.3);
         if shown > 0.0 {
             let mut fill = rect;
             fill.set_width(rect.width() * shown);
@@ -209,7 +225,11 @@ pub struct Avatar<'a> {
 
 impl<'a> Avatar<'a> {
     pub fn new(fallback: impl Into<String>) -> Self {
-        Self { fallback: fallback.into(), image: None, size: 32.0 }
+        Self {
+            fallback: fallback.into(),
+            image: None,
+            size: 32.0,
+        }
     }
     pub fn image(mut self, source: impl Into<egui::ImageSource<'a>>) -> Self {
         self.image = Some(source.into());
@@ -230,9 +250,7 @@ impl Widget for Avatar<'_> {
         let mut drew_image = false;
         if let Some(source) = self.image {
             let image = egui::Image::new(source).corner_radius(radius);
-            if let Ok(egui::load::TexturePoll::Ready { .. }) =
-                image.load_for_size(ui.ctx(), rect.size())
-            {
+            if let Ok(egui::load::TexturePoll::Ready { .. }) = image.load_for_size(ui.ctx(), rect.size()) {
                 image.paint_at(ui, rect);
                 drew_image = true;
             }
@@ -240,7 +258,8 @@ impl Widget for Avatar<'_> {
         if !drew_image {
             let font = FontId::proportional(self.size * 0.4);
             let galley = ui.painter().layout_no_wrap(self.fallback, font, t.foreground);
-            ui.painter().galley(rect.center() - galley.size() / 2.0, galley, t.foreground);
+            ui.painter()
+                .galley(rect.center() - galley.size() / 2.0, galley, t.foreground);
         }
         response
     }
@@ -263,7 +282,6 @@ pub(crate) fn paint_check(painter: &egui::Painter, rect: Rect, color: Color32, w
 /// Draws a chevron pointing down (or right when `right` is true).
 pub(crate) fn paint_chevron(painter: &egui::Painter, center: egui::Pos2, angle: f32, color: Color32) {
     let rot = egui::emath::Rot2::from_angle(angle);
-    let pts = [Vec2::new(-4.0, -2.0), Vec2::new(0.0, 2.0), Vec2::new(4.0, -2.0)]
-        .map(|p| center + rot * p);
+    let pts = [Vec2::new(-4.0, -2.0), Vec2::new(0.0, 2.0), Vec2::new(4.0, -2.0)].map(|p| center + rot * p);
     painter.line(pts.to_vec(), Stroke::new(1.5, color));
 }

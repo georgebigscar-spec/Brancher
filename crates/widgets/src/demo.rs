@@ -73,7 +73,11 @@ impl Gallery {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(Theme::get(ctx).background).inner_margin(32))
+            .frame(
+                egui::Frame::new()
+                    .fill(Theme::get(ctx).background)
+                    .inner_margin(32),
+            )
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| self.content(ui));
             });
@@ -122,7 +126,11 @@ impl Gallery {
                 let short = !self.password.is_empty() && self.password.len() < 8;
                 ui.add(Input::new(&mut self.password).password().invalid(short));
                 if short {
-                    ui.label(RichText::new("At least 8 characters").size(12.0).color(Theme::get(ui.ctx()).destructive));
+                    ui.label(
+                        RichText::new("At least 8 characters")
+                            .size(12.0)
+                            .color(Theme::get(ui.ctx()).destructive),
+                    );
                 }
                 ui.add_space(4.0);
                 ui.add(Checkbox::new(&mut self.terms).label("Accept terms and conditions"));
@@ -142,7 +150,8 @@ impl Gallery {
             ui.add(Button::outline("Outline"));
             ui.add(Button::ghost("Ghost"));
             ui.add(Button::link("Link"));
-            ui.add(Button::outline("+").size(ButtonSize::Icon)).tooltip("Add to library");
+            ui.add(Button::outline("+").size(ButtonSize::Icon))
+                .tooltip("Add to library");
             ui.add(Button::new("Small").size(ButtonSize::Sm));
             ui.add_enabled(false, Button::new("Disabled"));
         });
@@ -173,20 +182,22 @@ impl Gallery {
 
         ui.add_space(12.0);
         label(ui, "Tree");
-        Tree::new("files").default_open_depth(1).show(ui, &mut self.file, |tree| {
-            tree.folder("src", "src", |tree| {
-                tree.folder("src/components", "components", |tree| {
-                    tree.leaf("src/components/button.rs", "button.rs");
-                    tree.leaf("src/components/card.rs", "card.rs");
+        Tree::new("files")
+            .default_open_depth(1)
+            .show(ui, &mut self.file, |tree| {
+                tree.folder("src", "src", |tree| {
+                    tree.folder("src/components", "components", |tree| {
+                        tree.leaf("src/components/button.rs", "button.rs");
+                        tree.leaf("src/components/card.rs", "card.rs");
+                    });
+                    tree.leaf("src/lib.rs", "lib.rs");
+                    tree.leaf("src/tree.rs", "tree.rs");
                 });
-                tree.leaf("src/lib.rs", "lib.rs");
-                tree.leaf("src/tree.rs", "tree.rs");
+                tree.folder("examples", "examples", |tree| {
+                    tree.leaf("examples/gallery.rs", "gallery.rs");
+                });
+                tree.leaf("Cargo.toml", "Cargo.toml");
             });
-            tree.folder("examples", "examples", |tree| {
-                tree.leaf("examples/gallery.rs", "gallery.rs");
-            });
-            tree.leaf("Cargo.toml", "Cargo.toml");
-        });
     }
 
     fn column_middle(&mut self, ui: &mut Ui) {
@@ -223,7 +234,11 @@ impl Gallery {
         radio_group(
             ui,
             &mut self.density,
-            &[("default", "Default"), ("comfortable", "Comfortable"), ("compact", "Compact")],
+            &[
+                ("default", "Default"),
+                ("comfortable", "Comfortable"),
+                ("compact", "Compact"),
+            ],
         );
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -234,7 +249,8 @@ impl Gallery {
         ui.add(Progress::new(self.volume / 100.0));
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.add(Toggle::new(&mut self.bold, "B").outline()).tooltip("Toggle bold");
+            ui.add(Toggle::new(&mut self.bold, "B").outline())
+                .tooltip("Toggle bold");
             toggle_group(ui, &mut self.align, &["Left", "Center", "Right"]);
         });
     }

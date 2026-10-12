@@ -1,11 +1,13 @@
 //! UI: функция от состояния. Рисует [`AppState`] и возвращает [`Action`]-ы — ничего не
 //! запускает и не читает с диска (раздел 3, правило потоков).
 
+mod diff_view;
+mod graph;
 mod repo_view;
 mod welcome;
 
-use egui::Ui;
 use brancher_core::{Action, AppState, Severity};
+use egui::Ui;
 use widgets::Theme;
 
 /// Локальное состояние UI, которое не относится к модели (тексты полей ввода, тема).

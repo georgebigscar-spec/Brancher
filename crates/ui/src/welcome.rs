@@ -1,7 +1,7 @@
 //! Стартовая страница (REPO-01, REPO-02). Группы, drag-and-drop и клонирование — дальше по плану.
 
-use egui::Ui;
 use brancher_core::{Action, AppState};
+use egui::Ui;
 
 pub fn show(ui: &mut Ui, state: &AppState, open_path: &mut String, actions: &mut Vec<Action>) {
     ui.add_space(24.0);

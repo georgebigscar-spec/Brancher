@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use brancher_core::{ChangeKind, RefKind};
+use brancher_core::{ChangeKind, DiffTarget, LineKind, RefKind};
 use brancher_git::{CancelToken, Git, GitError, Runner};
 
 struct TempRepo(PathBuf);
@@ -117,6 +117,77 @@ fn stage_commit_unstage_roundtrip() {
     let log = g.log(repo.path(), 10, &c).unwrap();
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].subject, "Первый коммит (исправлен)");
+}
+
+#[test]
+fn diffs_for_commits_and_working_tree() {
+    let repo = TempRepo::new("diff");
+    let c = CancelToken::new();
+    let g = git();
+    let change = |path: &str, staged, untracked| DiffTarget::Change {
+        path: path.into(),
+        staged,
+        untracked,
+    };
+
+    // Untracked: сравнение с пустым файлом через --no-index (код выхода 1 — не ошибка).
+    repo.write("файл с пробелом.txt", "один\nдва\n");
+    let d = g
+        .diff(repo.path(), &change("файл с пробелом.txt", false, true), &c)
+        .unwrap();
+    assert_eq!(d.len(), 1);
+    assert_eq!(d[0].path(), "файл с пробелом.txt");
+    assert_eq!(d[0].old_path, None);
+    assert_eq!(d[0].stats(), (2, 0));
+
+    g.stage(repo.path(), &["файл с пробелом.txt".into()], &c).unwrap();
+    let d = g
+        .diff(repo.path(), &change("файл с пробелом.txt", true, false), &c)
+        .unwrap();
+    assert_eq!(d[0].stats(), (2, 0));
+    g.commit(repo.path(), "root", false, &c).unwrap();
+
+    // Корневой коммит сравнивается с пустым деревом.
+    let root = g.log(repo.path(), 1, &c).unwrap().remove(0);
+    let d = g
+        .diff(
+            repo.path(),
+            &DiffTarget::Commit {
+                id: root.id.clone(),
+                parent: None,
+            },
+            &c,
+        )
+        .unwrap();
+    assert_eq!((d.len(), d[0].stats()), (1, (2, 0)));
+
+    // Изменение в рабочем дереве и затем в коммите.
+    repo.write("файл с пробелом.txt", "один\nтри\n");
+    let d = g
+        .diff(repo.path(), &change("файл с пробелом.txt", false, false), &c)
+        .unwrap();
+    let kinds: Vec<_> = d[0].hunks[0].lines.iter().map(|l| l.kind).collect();
+    assert_eq!(kinds, [LineKind::Context, LineKind::Removed, LineKind::Added]);
+    assert!(g
+        .diff(repo.path(), &change("файл с пробелом.txt", true, false), &c)
+        .unwrap()
+        .is_empty());
+
+    g.stage(repo.path(), &["файл с пробелом.txt".into()], &c).unwrap();
+    g.commit(repo.path(), "second", false, &c).unwrap();
+    let head = g.log(repo.path(), 1, &c).unwrap().remove(0);
+    let d = g
+        .diff(
+            repo.path(),
+            &DiffTarget::Commit {
+                id: head.id,
+                parent: Some(root.id),
+            },
+            &c,
+        )
+        .unwrap();
+    assert_eq!(d[0].stats(), (1, 1));
+    assert_eq!(d[0].hunks[0].lines[2].text, "три");
 }
 
 #[test]

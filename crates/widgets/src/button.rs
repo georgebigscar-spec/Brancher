@@ -85,9 +85,11 @@ impl Widget for Button {
             ButtonSize::Lg => (40.0, 24.0),
             ButtonSize::Icon => (36.0, 0.0),
         };
-        let galley =
-            ui.painter()
-                .layout_no_wrap(self.text.clone(), FontId::proportional(14.0), Color32::PLACEHOLDER);
+        let galley = ui.painter().layout_no_wrap(
+            self.text.clone(),
+            FontId::proportional(14.0),
+            Color32::PLACEHOLDER,
+        );
         let width = if self.size == ButtonSize::Icon {
             height
         } else if self.full_width {
@@ -103,25 +105,41 @@ impl Widget for Button {
         if ui.is_rect_visible(rect) {
             let hovered = response.hovered();
             let pressed = response.is_pointer_button_down_on();
-            let k = if pressed { 0.2 } else if hovered { 0.1 } else { 0.0 };
+            let k = if pressed {
+                0.2
+            } else if hovered {
+                0.1
+            } else {
+                0.0
+            };
             let none = Stroke::NONE;
             let (fill, fg, stroke) = match self.variant {
                 ButtonVariant::Default => (mix(t.primary, t.background, k), t.primary_foreground, none),
-                ButtonVariant::Destructive => {
-                    (mix(t.destructive, t.background, k), t.destructive_foreground, none)
-                }
+                ButtonVariant::Destructive => (
+                    mix(t.destructive, t.background, k),
+                    t.destructive_foreground,
+                    none,
+                ),
                 ButtonVariant::Secondary => {
                     let base = t.secondary;
                     (mix(base, t.foreground, k * 0.3), t.secondary_foreground, none)
                 }
                 ButtonVariant::Outline => (
                     if hovered { t.accent } else { t.background },
-                    if hovered { t.accent_foreground } else { t.foreground },
+                    if hovered {
+                        t.accent_foreground
+                    } else {
+                        t.foreground
+                    },
                     Stroke::new(1.0, t.input),
                 ),
                 ButtonVariant::Ghost => (
                     if hovered { t.accent } else { Color32::TRANSPARENT },
-                    if hovered { t.accent_foreground } else { t.foreground },
+                    if hovered {
+                        t.accent_foreground
+                    } else {
+                        t.foreground
+                    },
                     none,
                 ),
                 ButtonVariant::Link => (Color32::TRANSPARENT, t.primary, none),

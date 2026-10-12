@@ -1,9 +1,8 @@
 //! Floating UI: Select, DropdownMenu, Popover, Tooltip, Dialog, Toaster.
 
 use egui::{
-    Align2, Color32, Context, CursorIcon, FontId, Frame, Id, Margin, Modal, Popup,
-    PopupCloseBehavior, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
-    Widget, WidgetInfo, WidgetType,
+    Align2, Color32, Context, CursorIcon, FontId, Frame, Id, Margin, Modal, Popup, PopupCloseBehavior, Pos2,
+    Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, Widget, WidgetInfo, WidgetType,
 };
 
 use crate::basic::{paint_check, paint_chevron};
@@ -23,7 +22,12 @@ pub struct Select<'a> {
 
 impl<'a> Select<'a> {
     pub fn new(selected: &'a mut Option<usize>, options: &'a [&'a str]) -> Self {
-        Self { selected, options, placeholder: "Select…".into(), width: 180.0 }
+        Self {
+            selected,
+            options,
+            placeholder: "Select…".into(),
+            width: 180.0,
+        }
     }
     pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
         self.placeholder = placeholder.into();
@@ -38,25 +42,47 @@ impl<'a> Select<'a> {
 impl Widget for Select<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let t = Theme::get(ui.ctx());
-        let (rect, mut response) =
-            ui.allocate_exact_size(Vec2::new(self.width, 36.0), Sense::click());
+        let (rect, mut response) = ui.allocate_exact_size(Vec2::new(self.width, 36.0), Sense::click());
         let current = self.selected.and_then(|i| self.options.get(i).copied());
         response.widget_info(|| {
-            WidgetInfo::labeled(WidgetType::ComboBox, ui.is_enabled(), current.unwrap_or(&self.placeholder))
+            WidgetInfo::labeled(
+                WidgetType::ComboBox,
+                ui.is_enabled(),
+                current.unwrap_or(&self.placeholder),
+            )
         });
         response = response.on_hover_cursor(CursorIcon::PointingHand);
 
         let p = ui.painter();
-        let fill = if t.dark { t.input.gamma_multiply(0.3) } else { Color32::TRANSPARENT };
+        let fill = if t.dark {
+            t.input.gamma_multiply(0.3)
+        } else {
+            Color32::TRANSPARENT
+        };
         p.add(t.shadow_sm().as_shape(rect, t.radius_md()));
-        p.rect(rect, t.radius_md(), fill.to_opaque_or(t.background), Stroke::new(1.0, t.input), StrokeKind::Inside);
+        p.rect(
+            rect,
+            t.radius_md(),
+            fill.to_opaque_or(t.background),
+            Stroke::new(1.0, t.input),
+            StrokeKind::Inside,
+        );
         let (text, color) = match current {
             Some(s) => (s.to_owned(), t.foreground),
             None => (self.placeholder.clone(), t.muted_foreground),
         };
         let g = p.layout_no_wrap(text, FontId::proportional(14.0), color);
-        p.galley(Pos2::new(rect.left() + 12.0, rect.center().y - g.size().y / 2.0), g, color);
-        paint_chevron(p, Pos2::new(rect.right() - 16.0, rect.center().y), 0.0, t.muted_foreground);
+        p.galley(
+            Pos2::new(rect.left() + 12.0, rect.center().y - g.size().y / 2.0),
+            g,
+            color,
+        );
+        paint_chevron(
+            p,
+            Pos2::new(rect.right() - 16.0, rect.center().y),
+            0.0,
+            t.muted_foreground,
+        );
 
         let mut changed = false;
         let popup = Popup::menu(&response)
@@ -89,7 +115,11 @@ trait OpaqueOr {
 }
 impl OpaqueOr for Color32 {
     fn to_opaque_or(self, fallback: Color32) -> Color32 {
-        if self.a() == 0 { fallback } else { self }
+        if self.a() == 0 {
+            fallback
+        } else {
+            self
+        }
     }
 }
 
@@ -104,9 +134,17 @@ fn menu_row(ui: &mut Ui, text: &str, shortcut: Option<&str>, checked: bool) -> R
     if response.hovered() || response.has_focus() {
         p.rect_filled(rect, t.radius_sm(), t.accent);
     }
-    let fg = if response.hovered() { t.accent_foreground } else { t.popover_foreground };
+    let fg = if response.hovered() {
+        t.accent_foreground
+    } else {
+        t.popover_foreground
+    };
     let g = p.layout_no_wrap(text.to_owned(), FontId::proportional(14.0), fg);
-    p.galley(Pos2::new(rect.left() + 8.0, rect.center().y - g.size().y / 2.0), g, fg);
+    p.galley(
+        Pos2::new(rect.left() + 8.0, rect.center().y - g.size().y / 2.0),
+        g,
+        fg,
+    );
     if let Some(s) = shortcut {
         p.text(
             Pos2::new(rect.right() - 8.0, rect.center().y),
@@ -169,7 +207,12 @@ pub fn menu_label(ui: &mut Ui, text: &str) {
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.add_space(8.0);
-        ui.label(RichText::new(text).size(14.0).strong().color(t.popover_foreground));
+        ui.label(
+            RichText::new(text)
+                .size(14.0)
+                .strong()
+                .color(t.popover_foreground),
+        );
     });
     ui.add_space(6.0);
 }
@@ -188,11 +231,7 @@ pub fn menu_separator(ui: &mut Ui) {
 
 /// `<Popover>`: free-form content that opens when `trigger` is clicked and
 /// closes when clicking outside.
-pub fn popover<R>(
-    trigger: &Response,
-    width: f32,
-    add_contents: impl FnOnce(&mut Ui) -> R,
-) -> Option<R> {
+pub fn popover<R>(trigger: &Response, width: f32, add_contents: impl FnOnce(&mut Ui) -> R) -> Option<R> {
     let t = Theme::get(&trigger.ctx);
     Popup::from_toggle_button_response(trigger)
         .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
@@ -247,7 +286,12 @@ pub struct DialogResponse<R> {
 
 impl Dialog {
     pub fn new(id_salt: impl egui::AsId, title: impl Into<String>) -> Self {
-        Self { id: Id::new(id_salt), title: title.into(), description: None, width: 425.0 }
+        Self {
+            id: Id::new(id_salt),
+            title: title.into(),
+            description: None,
+            width: 425.0,
+        }
     }
     pub fn description(mut self, text: impl Into<String>) -> Self {
         self.description = Some(text.into());
@@ -276,7 +320,11 @@ impl Dialog {
                 let top = ui.max_rect().right_top();
                 let close = Rect::from_center_size(top + Vec2::new(-4.0, 4.0), Vec2::splat(20.0));
                 let r = ui.interact(close, self.id.with("close"), Sense::click());
-                let c = if r.hovered() { t.foreground } else { t.muted_foreground };
+                let c = if r.hovered() {
+                    t.foreground
+                } else {
+                    t.muted_foreground
+                };
                 let p = ui.painter();
                 let s = 4.5;
                 let m = close.center();
@@ -292,14 +340,18 @@ impl Dialog {
                 ui.add_space(8.0);
                 add_contents(ui)
             });
-        DialogResponse { should_close: modal.should_close() || close_clicked, inner: modal.inner }
+        DialogResponse {
+            should_close: modal.should_close() || close_clicked,
+            inner: modal.inner,
+        }
     }
 }
 
 /// Right-aligned footer row for a dialog or card (`<DialogFooter>`).
 pub fn footer<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
     ui.add_space(8.0);
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add_contents).inner
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add_contents)
+        .inner
 }
 
 /// Convenience: an `<AlertDialog>` with Cancel / Continue. Returns
@@ -311,17 +363,19 @@ pub fn alert_dialog(
     description: &str,
     action: &str,
 ) -> Option<bool> {
-    let resp = Dialog::new(id_salt, title).description(description).show(ctx, |ui| {
-        footer(ui, |ui| {
-            if ui.add(Button::new(action)).clicked() {
-                return Some(true);
-            }
-            if ui.add(Button::outline("Cancel")).clicked() {
-                return Some(false);
-            }
-            None
-        })
-    });
+    let resp = Dialog::new(id_salt, title)
+        .description(description)
+        .show(ctx, |ui| {
+            footer(ui, |ui| {
+                if ui.add(Button::new(action)).clicked() {
+                    return Some(true);
+                }
+                if ui.add(Button::outline("Cancel")).clicked() {
+                    return Some(false);
+                }
+                None
+            })
+        });
     resp.inner.or(resp.should_close.then_some(false))
 }
 
@@ -365,7 +419,13 @@ fn push_toast(ctx: &Context, title: String, description: Option<String>, destruc
         let s = d.get_temp_mut_or_default::<ToastState>(toast_state_id());
         s.next_id += 1;
         let id = s.next_id;
-        s.toasts.push(Toast { id, title, description, created: now, destructive });
+        s.toasts.push(Toast {
+            id,
+            title,
+            description,
+            created: now,
+            destructive,
+        });
     });
 }
 
@@ -375,7 +435,9 @@ impl Toaster {
     pub fn show(ctx: &Context) {
         let t = Theme::get(ctx);
         let now = ctx.input(|i| i.time);
-        let mut state = ctx.data(|d| d.get_temp::<ToastState>(toast_state_id())).unwrap_or_default();
+        let mut state = ctx
+            .data(|d| d.get_temp::<ToastState>(toast_state_id()))
+            .unwrap_or_default();
         state.toasts.retain(|toast| now - toast.created < Self::LIFETIME);
         if state.toasts.is_empty() {
             ctx.data_mut(|d| d.insert_temp(toast_state_id(), state));
@@ -386,7 +448,10 @@ impl Toaster {
         let mut bottom = screen.bottom() - 16.0;
         for toast in state.toasts.iter().rev().take(3) {
             let age = (now - toast.created) as f32;
-            let fade = (age / 0.15).min(1.0).min(((Self::LIFETIME as f32) - age) / 0.3).clamp(0.0, 1.0);
+            let fade = (age / 0.15)
+                .min(1.0)
+                .min(((Self::LIFETIME as f32) - age) / 0.3)
+                .clamp(0.0, 1.0);
             let area = egui::Area::new(Id::new(("shadcn_toast", toast.id)))
                 .order(egui::Order::Foreground)
                 .pivot(Align2::RIGHT_BOTTOM)
@@ -401,7 +466,11 @@ impl Toaster {
                         .shadow(t.shadow_lg())
                         .show(ui, |ui| {
                             ui.set_width(324.0);
-                            let title_color = if toast.destructive { t.destructive } else { t.popover_foreground };
+                            let title_color = if toast.destructive {
+                                t.destructive
+                            } else {
+                                t.popover_foreground
+                            };
                             ui.label(RichText::new(&toast.title).size(14.0).strong().color(title_color));
                             if let Some(d) = &toast.description {
                                 ui.add_space(-4.0);

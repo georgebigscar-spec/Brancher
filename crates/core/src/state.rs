@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::diff::{Diff, DiffTarget};
+use crate::graph::CommitGraph;
 use crate::model::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -20,12 +22,13 @@ pub enum Job {
         message: String,
         amend: bool,
     },
+    Diff(DiffTarget),
 }
 
 impl Job {
     /// Изменяет ли задача репозиторий (такие задачи идут строго по одной, раздел 3).
     pub fn is_write(&self) -> bool {
-        !matches!(self, Job::Refresh { .. })
+        !matches!(self, Job::Refresh { .. } | Job::Diff(_))
     }
 
     pub fn label(&self) -> &'static str {
@@ -34,7 +37,22 @@ impl Job {
             Job::Stage(_) => "stage",
             Job::Unstage(_) => "unstage",
             Job::Commit { .. } => "commit",
+            Job::Diff(_) => "diff",
         }
+    }
+}
+
+/// История коммитов вместе с раскладкой графа, посчитанной в фоне.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct History {
+    pub commits: Vec<Commit>,
+    pub graph: CommitGraph,
+}
+
+impl History {
+    pub fn new(commits: Vec<Commit>) -> Self {
+        let graph = CommitGraph::build(&commits);
+        Self { commits, graph }
     }
 }
 
@@ -42,7 +60,11 @@ impl Job {
 pub enum JobResult {
     Status(Result<RepoStatus, JobError>),
     Refs(Result<Vec<GitRef>, JobError>),
-    History(Result<Vec<Commit>, JobError>),
+    History(Result<History, JobError>),
+    Diff {
+        target: DiffTarget,
+        result: Result<Diff, JobError>,
+    },
     /// Задача завершена (после этого счётчик занятости уменьшается).
     Finished {
         job: &'static str,
@@ -59,7 +81,14 @@ pub enum Action {
     SelectTab(usize),
     CloseTab(usize),
     Refresh,
+    /// Выбрать коммит и показать его diff; `None` снимает выбор.
     SelectCommit(Option<Oid>),
+    /// Показать diff файла рабочей копии (индексированную или нет сторону).
+    SelectChange {
+        path: String,
+        staged: bool,
+    },
+    CloseDiff,
     Stage(Vec<String>),
     StageAll,
     Unstage(Vec<String>),
@@ -108,7 +137,13 @@ pub struct RepoState {
     pub status: Option<RepoStatus>,
     pub refs: Vec<GitRef>,
     pub history: Vec<Commit>,
+    /// Раскладка графа для `history`, строка в строку.
+    pub graph: CommitGraph,
     pub selected_commit: Option<Oid>,
+    /// Что показывает панель diff; `None` — панель закрыта.
+    pub diff_target: Option<DiffTarget>,
+    /// Загруженный diff для `diff_target`; `None`, пока идёт загрузка.
+    pub diff: Option<Diff>,
     pub commit_message: String,
     pub amend: bool,
     /// Сколько задач сейчас выполняется.
@@ -120,6 +155,39 @@ pub struct RepoState {
 impl RepoState {
     fn id(&self) -> RepoId {
         self.id.expect("RepoState без id")
+    }
+
+    /// Открывает панель diff и возвращает задачу загрузки.
+    fn show_diff(&mut self, target: DiffTarget) -> Vec<Effect> {
+        if self.diff_target.as_ref() == Some(&target) {
+            return vec![];
+        }
+        self.diff_target = Some(target.clone());
+        self.diff = None;
+        vec![Effect::Spawn {
+            repo: self.id(),
+            job: Job::Diff(target),
+        }]
+    }
+
+    fn close_diff(&mut self) {
+        self.diff_target = None;
+        self.diff = None;
+    }
+
+    /// Цель diff для файла рабочей копии, если он всё ещё изменён на этой стороне.
+    fn change_target(&self, path: &str, staged: bool) -> Option<DiffTarget> {
+        let status = self.status.as_ref()?;
+        let change = if staged {
+            status.staged().find(|c| c.path == path)?
+        } else {
+            status.unstaged().find(|c| c.path == path)?
+        };
+        Some(DiffTarget::Change {
+            path: path.to_owned(),
+            staged,
+            untracked: !staged && change.unstaged == Some(ChangeKind::Untracked),
+        })
     }
 }
 
@@ -244,8 +312,32 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             let spawn = |job| vec![Effect::Spawn { repo: id, job }];
             match action {
                 Action::Refresh => vec![refresh(id)],
-                Action::SelectCommit(oid) => {
-                    repo.selected_commit = oid;
+                Action::SelectCommit(None) => {
+                    repo.selected_commit = None;
+                    if matches!(repo.diff_target, Some(DiffTarget::Commit { .. })) {
+                        repo.close_diff();
+                    }
+                    vec![]
+                }
+                Action::SelectCommit(Some(oid)) => {
+                    let parent = repo
+                        .history
+                        .iter()
+                        .find(|c| c.id == oid)
+                        .and_then(|c| c.parents.first().cloned());
+                    repo.selected_commit = Some(oid.clone());
+                    repo.show_diff(DiffTarget::Commit { id: oid, parent })
+                }
+                Action::SelectChange { path, staged } => match repo.change_target(&path, staged) {
+                    Some(target) => {
+                        repo.selected_commit = None;
+                        repo.show_diff(target)
+                    }
+                    None => vec![],
+                },
+                Action::CloseDiff => {
+                    repo.close_diff();
+                    repo.selected_commit = None;
                     vec![]
                 }
                 Action::Stage(paths) if !paths.is_empty() => spawn(Job::Stage(paths)),
@@ -323,7 +415,22 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
     match result {
         JobResult::Status(Ok(s)) => r.status = Some(s),
         JobResult::Refs(Ok(refs)) => r.refs = refs,
-        JobResult::History(Ok(h)) => r.history = h,
+        JobResult::History(Ok(h)) => {
+            r.history = h.commits;
+            r.graph = h.graph;
+        }
+        JobResult::Diff { target, result } => {
+            // Результат для уже закрытой или сменённой цели не нужен.
+            if r.diff_target.as_ref() == Some(&target) {
+                match result {
+                    Ok(d) => r.diff = Some(d),
+                    Err(e) => {
+                        r.close_diff();
+                        error = Some(("Не удалось получить diff".to_owned(), e));
+                    }
+                }
+            }
+        }
         JobResult::Status(Err(e)) | JobResult::Refs(Err(e)) | JobResult::History(Err(e)) => {
             error = Some(("Не удалось прочитать репозиторий".to_owned(), e))
         }
@@ -335,7 +442,9 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
                         r.commit_message.clear();
                         r.amend = false;
                     }
-                    if job != "refresh" {
+                    if job == "refresh" {
+                        effects.extend(refresh_change_diff(r));
+                    } else if job != "diff" {
                         effects.push(Effect::Spawn {
                             repo,
                             job: Job::Refresh { history_limit: limit },
@@ -351,6 +460,27 @@ pub fn apply_result(state: &mut AppState, repo: RepoId, result: JobResult) -> Ve
         state.notify_error(title, &e);
     }
     effects
+}
+
+/// После обновления статуса diff файла рабочей копии мог устареть: перечитываем его,
+/// а если файл на этой стороне больше не изменён (например, его проиндексировали) — закрываем.
+fn refresh_change_diff(r: &mut RepoState) -> Vec<Effect> {
+    let Some(DiffTarget::Change { path, staged, .. }) = r.diff_target.clone() else {
+        return vec![];
+    };
+    match r.change_target(&path, staged) {
+        Some(target) => {
+            r.diff_target = Some(target.clone());
+            vec![Effect::Spawn {
+                repo: r.id(),
+                job: Job::Diff(target),
+            }]
+        }
+        None => {
+            r.close_diff();
+            vec![]
+        }
+    }
 }
 
 #[cfg(test)]
@@ -480,7 +610,146 @@ mod tests {
         let mut s = AppState::new();
         let id = open(&mut s, "/a");
         reduce(&mut s, Action::CloseTab(0));
-        assert!(apply_result(&mut s, id, JobResult::History(Ok(vec![]))).is_empty());
+        assert!(apply_result(&mut s, id, JobResult::History(Ok(History::default()))).is_empty());
+    }
+
+    fn change(p: &str, st: Option<ChangeKind>, un: Option<ChangeKind>) -> Change {
+        Change {
+            path: p.into(),
+            orig_path: None,
+            staged: st,
+            unstaged: un,
+        }
+    }
+
+    fn set_status(s: &mut AppState, id: RepoId, changes: Vec<Change>) {
+        let status = RepoStatus {
+            changes,
+            ..Default::default()
+        };
+        apply_result(s, id, JobResult::Status(Ok(status)));
+    }
+
+    #[test]
+    fn selecting_commit_loads_diff_against_first_parent() {
+        let mut s = AppState::new();
+        let id = open(&mut s, "/a");
+        let commits = vec![
+            Commit {
+                id: "m".into(),
+                parents: vec!["p1".into(), "p2".into()],
+                ..Default::default()
+            },
+            Commit {
+                id: "p1".into(),
+                ..Default::default()
+            },
+        ];
+        apply_result(&mut s, id, JobResult::History(Ok(History::new(commits))));
+        let target = DiffTarget::Commit {
+            id: "m".into(),
+            parent: Some("p1".into()),
+        };
+        assert_eq!(
+            reduce(&mut s, Action::SelectCommit(Some("m".into()))),
+            vec![Effect::Spawn {
+                repo: id,
+                job: Job::Diff(target.clone())
+            }]
+        );
+        // Повторный выбор того же коммита не перезапускает загрузку.
+        assert!(reduce(&mut s, Action::SelectCommit(Some("m".into()))).is_empty());
+
+        // Результат для другой цели игнорируется, для текущей — показывается.
+        let stale = DiffTarget::Commit {
+            id: "x".into(),
+            parent: None,
+        };
+        apply_result(
+            &mut s,
+            id,
+            JobResult::Diff {
+                target: stale,
+                result: Ok(Diff::default()),
+            },
+        );
+        assert_eq!(s.active_repo().unwrap().diff, None);
+        apply_result(
+            &mut s,
+            id,
+            JobResult::Diff {
+                target,
+                result: Ok(Diff::default()),
+            },
+        );
+        assert_eq!(s.active_repo().unwrap().diff, Some(Diff::default()));
+        let fx = apply_result(
+            &mut s,
+            id,
+            JobResult::Finished {
+                job: "diff",
+                result: Ok(()),
+            },
+        );
+        assert!(fx.is_empty(), "diff не должен вызывать обновление репозитория");
+
+        reduce(&mut s, Action::CloseDiff);
+        let r = s.active_repo().unwrap();
+        assert_eq!((r.diff_target.as_ref(), r.selected_commit.as_ref()), (None, None));
+    }
+
+    #[test]
+    fn change_diff_marks_untracked_and_follows_refresh() {
+        let mut s = AppState::new();
+        let id = open(&mut s, "/a");
+        set_status(
+            &mut s,
+            id,
+            vec![change("new.txt", None, Some(ChangeKind::Untracked))],
+        );
+        let fx = reduce(
+            &mut s,
+            Action::SelectChange {
+                path: "new.txt".into(),
+                staged: false,
+            },
+        );
+        assert_eq!(
+            fx,
+            vec![Effect::Spawn {
+                repo: id,
+                job: Job::Diff(DiffTarget::Change {
+                    path: "new.txt".into(),
+                    staged: false,
+                    untracked: true
+                })
+            }]
+        );
+        let refresh_done = |s: &mut AppState| {
+            apply_result(
+                s,
+                id,
+                JobResult::Finished {
+                    job: "refresh",
+                    result: Ok(()),
+                },
+            )
+        };
+        // Файл всё ещё не проиндексирован — diff перечитывается.
+        assert_eq!(refresh_done(&mut s).len(), 1);
+        // Файл проиндексировали — неиндексированного diff больше нет, панель закрывается.
+        set_status(&mut s, id, vec![change("new.txt", Some(ChangeKind::Added), None)]);
+        assert!(refresh_done(&mut s).is_empty());
+        assert_eq!(s.active_repo().unwrap().diff_target, None);
+        // Неизвестный путь ничего не открывает.
+        let fx = reduce(
+            &mut s,
+            Action::SelectChange {
+                path: "nope".into(),
+                staged: true,
+            },
+        );
+        assert!(fx.is_empty());
     }
 
     #[test]
