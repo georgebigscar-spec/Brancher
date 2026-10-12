@@ -14,7 +14,7 @@ pub use version::{GitVersion, MIN_GIT_VERSION};
 
 use std::path::{Path, PathBuf};
 
-use brancher_core::{Commit, DiffTarget, FileDiff, GitRef, Operation, Progress, RepoStatus, Stash};
+use brancher_core::{Blame, Commit, DiffTarget, FileDiff, GitRef, Operation, Progress, RepoStatus, Stash};
 
 /// Высокоуровневые операции поверх [`Runner`].
 #[derive(Debug, Clone)]
@@ -122,6 +122,34 @@ impl Git {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = self.runner.run(Some(repo), &args, None, cancel)?;
         commands::log::parse(&out.stdout)
+    }
+
+    /// История файла с переименованиями, новые коммиты сверху.
+    pub fn file_log(
+        &self,
+        repo: &Path,
+        path: &str,
+        limit: usize,
+        cancel: &CancelToken,
+    ) -> Result<Vec<Commit>, GitError> {
+        let args = commands::log::file_args(path, limit);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self.runner.run(Some(repo), &args, None, cancel)?;
+        commands::log::parse(&out.stdout)
+    }
+
+    /// Blame файла в коммите `rev` или в рабочей копии (`None`).
+    pub fn blame(
+        &self,
+        repo: &Path,
+        path: &str,
+        rev: Option<&str>,
+        cancel: &CancelToken,
+    ) -> Result<Blame, GitError> {
+        let args = commands::blame::args(path, rev);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self.runner.run(Some(repo), &args, None, cancel)?;
+        commands::blame::parse(&out.stdout)
     }
 
     pub fn diff(

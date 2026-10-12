@@ -1,7 +1,9 @@
 //! Вкладка репозитория: ветки слева, история в центре, изменения и коммит справа.
 //! Граф коммитов рисует [`crate::graph`]; diff и blame — следующие шаги MVP.
 
-use brancher_core::{Action, Change, Commit, DiffTarget, Operation, RepoState, RepoStatus, Settings};
+use brancher_core::{
+    Action, Change, ChangeKind, Commit, DiffTarget, Operation, RepoState, RepoStatus, Settings,
+};
 use egui::{RichText, Ui};
 
 const ROW_HEIGHT: f32 = 24.0;
@@ -37,7 +39,7 @@ pub fn show(ui: &mut Ui, repo: &RepoState, settings: &Settings, actions: &mut Ve
         let center = (ui.available_width() - side - 16.0).max(200.0);
         ui.vertical(|ui| {
             ui.set_width(center);
-            if repo.diff_target.is_some() {
+            if repo.diff_target.is_some() || repo.file_view.is_some() {
                 // История сверху, diff снизу.
                 let history_height = (height * 0.4).max(120.0);
                 ui.allocate_ui(egui::vec2(center, history_height), |ui| {
@@ -45,7 +47,10 @@ pub fn show(ui: &mut Ui, repo: &RepoState, settings: &Settings, actions: &mut Ve
                     history(ui, repo, actions);
                 });
                 ui.separator();
-                crate::diff_view::show(ui, repo, settings, actions);
+                match &repo.file_view {
+                    Some(view) => crate::file_view::show(ui, repo, view, actions),
+                    None => crate::diff_view::show(ui, repo, settings, actions),
+                }
             } else {
                 history(ui, repo, actions);
             }
@@ -303,6 +308,21 @@ fn operation_banner(ui: &mut Ui, status: &RepoStatus, op: Operation, actions: &m
     });
 }
 
+/// Меню файла: blame (в коммите `rev` или в рабочей копии) и история.
+pub(crate) fn file_menu(response: &egui::Response, path: &str, rev: Option<&str>, actions: &mut Vec<Action>) {
+    widgets::context_menu(response, 200.0, |ui| {
+        if widgets::menu_item(ui, "Blame", None).clicked() {
+            actions.push(Action::ShowBlame {
+                path: path.to_owned(),
+                rev: rev.map(str::to_owned),
+            });
+        }
+        if widgets::menu_item(ui, "История файла", None).clicked() {
+            actions.push(Action::ShowFileHistory(path.to_owned()));
+        }
+    });
+}
+
 /// Подписи сторон конфликта: в rebase «наша» — ветка, на которую перебазируем.
 fn side_labels(op: Option<Operation>) -> (&'static str, &'static str) {
     match op {
@@ -358,6 +378,9 @@ fn file_list(
                     } else {
                         "Клик — diff, двойной клик — stage"
                     });
+                    if !c.is_conflicted() && c.unstaged != Some(ChangeKind::Untracked) {
+                        file_menu(&r, &c.path, None, actions);
+                    }
                     if c.is_conflicted() {
                         let (ours, theirs) = side_labels(repo.operation());
                         widgets::context_menu(&r, 260.0, |ui| {
