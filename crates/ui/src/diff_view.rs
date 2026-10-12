@@ -32,7 +32,7 @@ pub fn show(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
         widgets::muted(ui, "Изменений нет.");
         return;
     }
-    rows(ui, diff);
+    rows(ui, repo, diff, actions);
 }
 
 fn header(ui: &mut Ui, repo: &RepoState, target: &DiffTarget, actions: &mut Vec<Action>) {
@@ -79,11 +79,35 @@ fn header(ui: &mut Ui, repo: &RepoState, target: &DiffTarget, actions: &mut Vec<
             if close.clicked() || esc {
                 actions.push(Action::CloseDiff);
             }
+            selection_controls(ui, repo, target, actions);
         });
     });
 }
 
-fn rows(ui: &mut Ui, diff: &Diff) {
+/// Кнопка «Stage строки (N)» или подсказка, как выделять строки.
+fn selection_controls(ui: &mut Ui, repo: &RepoState, target: &DiffTarget, actions: &mut Vec<Action>) {
+    if !repo.can_select_lines() {
+        return;
+    }
+    let staged = matches!(target, DiffTarget::Change { staged: true, .. });
+    let n = repo.diff_selection.len();
+    if n == 0 {
+        widgets::muted(ui, "Клик или Shift+клик по строкам, чтобы выбрать");
+        return;
+    }
+    let verb = if staged { "Unstage" } else { "Stage" };
+    let button = ui
+        .add(widgets::Button::new(format!("{verb} строки ({n})")).size(widgets::ButtonSize::Sm))
+        .on_hover_text("S");
+    let key = ui.memory(|m| m.focused().is_none()) && ui.input(|i| i.key_pressed(egui::Key::S));
+    if button.clicked() || key {
+        actions.push(Action::ApplyDiffSelection);
+    }
+}
+
+fn rows(ui: &mut Ui, repo: &RepoState, diff: &Diff, actions: &mut Vec<Action>) {
+    let selectable = repo.can_select_lines();
+    let staged = matches!(repo.diff_target, Some(DiffTarget::Change { staged: true, .. }));
     let theme = Theme::get(ui.ctx());
     let font = FontId::monospace(FONT_SIZE);
     let char_width = ui.fonts_mut(|f| f.glyph_width(&font, 'M'));
@@ -97,7 +121,29 @@ fn rows(ui: &mut Ui, diff: &Diff) {
         .show_rows(ui, ROW_HEIGHT, diff.rows.len(), |ui, range| {
             let width = ui.available_width().max(content_width);
             for i in range {
-                let (rect, _) = ui.allocate_exact_size(vec2(width, ROW_HEIGHT), Sense::hover());
+                let change_line = match diff.rows[i] {
+                    DiffRow::Line(f, h, l) => {
+                        let kind = diff.files[f].hunks[h].lines[l].kind;
+                        matches!(kind, LineKind::Added | LineKind::Removed)
+                    }
+                    _ => false,
+                };
+                let sense = if selectable && change_line {
+                    Sense::click()
+                } else {
+                    Sense::hover()
+                };
+                let (rect, response) = ui.allocate_exact_size(vec2(width, ROW_HEIGHT), sense);
+                if let (true, DiffRow::Line(file, hunk, line)) = (response.clicked(), diff.rows[i]) {
+                    let m = ui.input(|i| i.modifiers);
+                    actions.push(Action::SelectDiffLine {
+                        file,
+                        hunk,
+                        line,
+                        extend: m.shift,
+                        toggle: m.command,
+                    });
+                }
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }
@@ -108,13 +154,23 @@ fn rows(ui: &mut Ui, diff: &Diff) {
                     DiffRow::Hunk(f, h) => {
                         painter.rect_filled(rect, 0.0, mix(theme.background, BLUE, 0.08));
                         let header = &diff.files[f].hunks[h].header;
-                        painter.text(
+                        let text = painter.text(
                             pos2(rect.left() + code_x, y),
                             Align2::LEFT_CENTER,
                             header,
                             font.clone(),
                             theme.muted_foreground,
                         );
+                        if selectable {
+                            let label = if staged {
+                                "Unstage ханк"
+                            } else {
+                                "Stage ханк"
+                            };
+                            if link(ui, &painter, pos2(text.right() + 16.0, y), label, (f, h), &theme) {
+                                actions.push(Action::ApplyHunk { file: f, hunk: h });
+                            }
+                        }
                     }
                     DiffRow::Line(f, h, l) => {
                         let line = &diff.files[f].hunks[h].lines[l];
@@ -123,9 +179,21 @@ fn rows(ui: &mut Ui, diff: &Diff) {
                             LineKind::Removed => (Some(RED), "-"),
                             LineKind::Context | LineKind::NoNewline => (None, ""),
                         };
+                        let selected = repo.diff_selection.contains(&(f, h, l));
                         if let Some(c) = bg {
-                            let t = if theme.dark { 0.22 } else { 0.14 };
+                            let t = match (selected, theme.dark) {
+                                (true, true) => 0.45,
+                                (true, false) => 0.32,
+                                (false, true) => 0.22,
+                                (false, false) => 0.14,
+                            };
                             painter.rect_filled(rect, 0.0, mix(theme.background, c, t));
+                        }
+                        if selected {
+                            let bar = Rect::from_min_size(rect.min, vec2(3.0, ROW_HEIGHT));
+                            painter.rect_filled(bar, 0.0, bg.unwrap_or(theme.foreground));
+                        } else if response.hovered() && selectable && change_line {
+                            painter.rect_filled(rect, 0.0, mix(Color32::TRANSPARENT, theme.foreground, 0.04));
                         }
                         let number = |n: Option<u32>, right: f32| {
                             if let Some(n) = n {
@@ -163,6 +231,42 @@ fn rows(ui: &mut Ui, diff: &Diff) {
                 }
             }
         });
+}
+
+/// Текстовая кнопка внутри строки, нарисованной вручную. Возвращает `true` при клике.
+fn link(
+    ui: &Ui,
+    painter: &egui::Painter,
+    at: egui::Pos2,
+    text: &str,
+    id: (usize, usize),
+    theme: &Theme,
+) -> bool {
+    let font = FontId::proportional(12.0);
+    let galley = painter.layout_no_wrap(text.to_owned(), font, theme.foreground);
+    let rect =
+        Rect::from_min_size(pos2(at.x, at.y - galley.size().y / 2.0), galley.size()).expand2(vec2(6.0, 1.0));
+    let response = ui
+        .interact(rect, ui.id().with(("hunk-action", id)), Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let fill = if response.hovered() {
+        theme.accent
+    } else {
+        theme.background
+    };
+    painter.rect(
+        rect,
+        theme.radius_sm(),
+        fill,
+        egui::Stroke::new(1.0, theme.border),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(
+        pos2(rect.left() + 6.0, rect.top() + 1.0),
+        galley,
+        theme.foreground,
+    );
+    response.clicked()
 }
 
 fn file_row(painter: &egui::Painter, rect: Rect, file: &FileDiff, theme: &Theme) {

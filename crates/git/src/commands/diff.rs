@@ -6,9 +6,10 @@ use super::utf8;
 use crate::GitError;
 
 /// Флаги, не зависящие от пользовательского конфига (`diff.noprefix`, внешние diff-утилиты).
-const COMMON: [&str; 5] = [
+const COMMON: [&str; 6] = [
     "--no-color",
     "--no-ext-diff",
+    "--no-textconv",
     "-M",
     "--src-prefix=a/",
     "--dst-prefix=b/",
@@ -68,13 +69,14 @@ pub fn parse(out: &[u8]) -> Result<Vec<FileDiff>, GitError> {
     let mut left_new = 0u32;
 
     for raw in out.split(|b| *b == b'\n') {
+        let cr = raw.ends_with(b"\r");
         let line = raw.strip_suffix(b"\r").unwrap_or(raw);
         let in_hunk = left_old > 0 || left_new > 0;
         if in_hunk || line.starts_with(b"\\") {
             let Some(file) = files.last_mut() else { continue };
-            let Some(hunk) = file.hunks.last_mut() else {
+            if file.hunks.is_empty() {
                 continue;
-            };
+            }
             let (kind, text) = match line.first() {
                 Some(b'+') => (LineKind::Added, &line[1..]),
                 Some(b'-') => (LineKind::Removed, &line[1..]),
@@ -103,11 +105,16 @@ pub fn parse(out: &[u8]) -> Result<Vec<FileDiff>, GitError> {
                 new_no += 1;
                 left_new = left_new.saturating_sub(1);
             }
+            // Не-UTF-8 текст показывается с заменой символов, но patch из него
+            // собрать нельзя: байты потеряны.
+            file.lossy |= std::str::from_utf8(text).is_err();
+            let hunk = file.hunks.last_mut().expect("проверено выше");
             hunk.lines.push(DiffLine {
                 kind,
                 old_no: o,
                 new_no: n,
                 text: utf8(text),
+                cr: cr && kind != LineKind::NoNewline,
             });
             continue;
         }
@@ -139,10 +146,12 @@ pub fn parse(out: &[u8]) -> Result<Vec<FileDiff>, GitError> {
             file.old_path = side_path(p, b"a/");
         } else if let Some(p) = line.strip_prefix(b"+++ ") {
             file.new_path = side_path(p, b"b/");
-        } else if line.starts_with(b"new file mode") {
+        } else if let Some(m) = line.strip_prefix(b"new file mode ") {
             file.old_path = None;
-        } else if line.starts_with(b"deleted file mode") {
+            file.mode = Some(utf8(m));
+        } else if let Some(m) = line.strip_prefix(b"deleted file mode ") {
             file.new_path = None;
+            file.mode = Some(utf8(m));
         } else if let Some(p) = line.strip_prefix(b"rename from ") {
             file.old_path = Some(unquote(&utf8(p)));
         } else if let Some(p) = line.strip_prefix(b"rename to ") {

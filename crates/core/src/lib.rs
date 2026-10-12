@@ -7,6 +7,7 @@
 pub mod diff;
 pub mod graph;
 pub mod model;
+pub mod patch;
 pub mod state;
 
 pub use diff::*;
