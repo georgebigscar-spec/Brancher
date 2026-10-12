@@ -1,8 +1,8 @@
 //! Structural components: Card, Alert, Tabs, Accordion, Table.
 
 use egui::{
-    collapsing_header::CollapsingState, Align2, Color32, CursorIcon, FontId, Frame, Id,
-    InnerResponse, Margin, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
+    collapsing_header::CollapsingState, Align2, Color32, CursorIcon, FontId, Frame, Id, InnerResponse,
+    Margin, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
 };
 
 use crate::basic::paint_chevron;
@@ -19,7 +19,11 @@ pub struct Card {
 
 impl Card {
     pub fn new() -> Self {
-        Self { title: None, description: None, width: None }
+        Self {
+            title: None,
+            description: None,
+            width: None,
+        }
     }
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
@@ -80,7 +84,12 @@ pub struct Alert {
 
 impl Alert {
     pub fn new(title: impl Into<String>) -> Self {
-        Self { title: title.into(), description: None, icon: None, destructive: false }
+        Self {
+            title: title.into(),
+            description: None,
+            icon: None,
+            destructive: false,
+        }
     }
     pub fn description(mut self, text: impl Into<String>) -> Self {
         self.description = Some(text.into());
@@ -136,7 +145,13 @@ pub fn tabs(ui: &mut Ui, selected: &mut usize, labels: &[&str]) -> Response {
     let font = FontId::proportional(14.0);
     let widths: Vec<f32> = labels
         .iter()
-        .map(|l| ui.painter().layout_no_wrap(l.to_string(), font.clone(), Color32::PLACEHOLDER).size().x + 24.0)
+        .map(|l| {
+            ui.painter()
+                .layout_no_wrap(l.to_string(), font.clone(), Color32::PLACEHOLDER)
+                .size()
+                .x
+                + 24.0
+        })
         .collect();
     let pad = 3.0;
     let size = Vec2::new(widths.iter().sum::<f32>() + 2.0 * pad, 36.0);
@@ -156,12 +171,30 @@ pub fn tabs(ui: &mut Ui, selected: &mut usize, labels: &[&str]) -> Response {
         let active = *selected == i;
         let p = ui.painter();
         if active {
-            let fill = if t.dark { t.input.gamma_multiply(0.3) } else { t.background };
+            let fill = if t.dark {
+                t.input.gamma_multiply(0.3)
+            } else {
+                t.background
+            };
             p.add(t.shadow_sm().as_shape(item, t.radius_md()));
-            let stroke = if t.dark { Stroke::new(1.0, t.input) } else { Stroke::NONE };
-            p.rect(item, t.radius_md(), if t.dark { t.background } else { fill }, stroke, StrokeKind::Inside);
+            let stroke = if t.dark {
+                Stroke::new(1.0, t.input)
+            } else {
+                Stroke::NONE
+            };
+            p.rect(
+                item,
+                t.radius_md(),
+                if t.dark { t.background } else { fill },
+                stroke,
+                StrokeKind::Inside,
+            );
         }
-        let fg = if active || r.hovered() { t.foreground } else { t.muted_foreground };
+        let fg = if active || r.hovered() {
+            t.foreground
+        } else {
+            t.muted_foreground
+        };
         p.text(item.center(), Align2::CENTER_CENTER, label, font.clone(), fg);
         if r.has_focus() {
             paint_focus_ring(p, item, t.radius_md(), &t);
@@ -195,7 +228,11 @@ impl Accordion {
         let (rect, header) = ui.allocate_exact_size(Vec2::new(width, 48.0), Sense::click());
         let header = header.on_hover_cursor(CursorIcon::PointingHand);
         if header.clicked() {
-            let next = if open_item == Some(item_id) { None } else { Some(item_id) };
+            let next = if open_item == Some(item_id) {
+                None
+            } else {
+                Some(item_id)
+            };
             ui.data_mut(|d| d.insert_temp(open_id, next));
             state.set_open(next.is_some());
         }
@@ -205,7 +242,11 @@ impl Accordion {
         let text_pos = Pos2::new(rect.left(), rect.center().y - galley.size().y / 2.0);
         if header.hovered() {
             let y = text_pos.y + galley.size().y + 1.0;
-            p.hline(rect.left()..=(rect.left() + galley.size().x), y, Stroke::new(1.0, t.foreground));
+            p.hline(
+                rect.left()..=(rect.left() + galley.size().x),
+                y,
+                Stroke::new(1.0, t.foreground),
+            );
         }
         p.galley(text_pos, galley, t.foreground);
         paint_chevron(
@@ -243,7 +284,11 @@ pub struct Table<'a> {
 
 impl<'a> Table<'a> {
     pub fn new(headers: &'a [&'a str]) -> Self {
-        Self { headers, widths: None, right_align: &[] }
+        Self {
+            headers,
+            widths: None,
+            right_align: &[],
+        }
     }
     /// Relative column widths, for example `&[1.0, 1.0, 2.0]`.
     pub fn widths(mut self, widths: &'a [f32]) -> Self {
@@ -273,7 +318,8 @@ impl<'a> Table<'a> {
 
         let mut clicked = None;
         let mut row_ui = |ui: &mut Ui, cells: Vec<&str>, header: bool, idx: usize| {
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(total, if header { 40.0 } else { 44.0 }), Sense::click());
+            let (rect, resp) =
+                ui.allocate_exact_size(Vec2::new(total, if header { 40.0 } else { 44.0 }), Sense::click());
             let p = ui.painter();
             if !header && resp.hovered() {
                 p.rect_filled(rect, 0.0, t.muted.gamma_multiply(0.5));

@@ -1,9 +1,9 @@
 //! Tree view in the style of the shadcn sidebar file tree.
 
 use egui::{
-    collapsing_header::CollapsingState, epaint::PathShape, Align2, CursorIcon, EventFilter, FontId,
-    Id, InnerResponse, Key, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2,
-    WidgetInfo, WidgetType,
+    collapsing_header::CollapsingState, epaint::PathShape, Align2, CursorIcon, EventFilter, FontId, Id,
+    InnerResponse, Key, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2, WidgetInfo,
+    WidgetType,
 };
 
 use crate::basic::paint_chevron;
@@ -40,7 +40,12 @@ pub struct Tree {
 
 impl Tree {
     pub fn new(id_salt: impl egui::AsId) -> Self {
-        Self { id: Id::new(id_salt), open_depth: 0, icons: true, max_height: None }
+        Self {
+            id: Id::new(id_salt),
+            open_depth: 0,
+            icons: true,
+            max_height: None,
+        }
     }
 
     /// Folders less than `depth` levels deep start open. Default 0: all closed.
@@ -69,7 +74,13 @@ impl Tree {
         add_nodes: impl FnOnce(&mut TreeUi<'_, T>) -> R,
     ) -> InnerResponse<R> {
         let multiple = selected.multiple();
-        let mut shared = Shared { changed: false, multiple, order: Vec::new(), range_to: None, focused: false };
+        let mut shared = Shared {
+            changed: false,
+            multiple,
+            order: Vec::new(),
+            range_to: None,
+            focused: false,
+        };
         let max_height = self.max_height;
         let id = self.id;
         let draw = |ui: &mut Ui| {
@@ -281,7 +292,12 @@ impl<T: PartialEq + Clone> TreeUi<'_, T> {
 
     /// A folder whose children are added by `add_children`, which only runs while it is open.
     /// The open state is kept per label, so siblings need distinct labels.
-    pub fn folder(&mut self, value: T, label: &str, add_children: impl FnOnce(&mut TreeUi<'_, T>)) -> Response {
+    pub fn folder(
+        &mut self,
+        value: T,
+        label: &str,
+        add_children: impl FnOnce(&mut TreeUi<'_, T>),
+    ) -> Response {
         self.folder_impl(value, label, None, add_children)
     }
 
@@ -304,7 +320,8 @@ impl<T: PartialEq + Clone> TreeUi<'_, T> {
         add_children: impl FnOnce(&mut TreeUi<'_, T>),
     ) -> Response {
         let id = self.id.with(label);
-        let mut state = CollapsingState::load_with_default_open(self.ui.ctx(), id, self.depth < self.open_depth);
+        let mut state =
+            CollapsingState::load_with_default_open(self.ui.ctx(), id, self.depth < self.open_depth);
         let response = self.row(id, value, label, Some(&mut state), content);
 
         let line_x = self.ui.max_rect().left() + self.depth as f32 * INDENT + 16.0;
@@ -324,7 +341,9 @@ impl<T: PartialEq + Clone> TreeUi<'_, T> {
         if let Some(body) = body {
             let t = Theme::get(self.ui.ctx());
             let r = body.response.rect;
-            self.ui.painter().vline(line_x, r.top()..=r.bottom(), Stroke::new(1.0, t.border));
+            self.ui
+                .painter()
+                .vline(line_x, r.top()..=r.bottom(), Stroke::new(1.0, t.border));
         }
         response
     }
@@ -351,7 +370,9 @@ impl<T: PartialEq + Clone> TreeUi<'_, T> {
         if self.shared.multiple {
             self.shared.order.push((response.id, value.clone()));
         }
-        response.widget_info(|| WidgetInfo::selected(WidgetType::SelectableLabel, ui.is_enabled(), is_selected, label));
+        response.widget_info(|| {
+            WidgetInfo::selected(WidgetType::SelectableLabel, ui.is_enabled(), is_selected, label)
+        });
 
         // Clicking focuses the row so the arrow keys work afterwards, but the focus
         // ring only shows once the keyboard is used (like `:focus-visible`).
@@ -362,7 +383,8 @@ impl<T: PartialEq + Clone> TreeUi<'_, T> {
         }
         let anchor_id = self.root.with("anchor");
         let modifiers = ui.input(|i| i.modifiers);
-        let multi_click = self.shared.multiple && response.clicked() && (modifiers.command || modifiers.shift);
+        let multi_click =
+            self.shared.multiple && response.clicked() && (modifiers.command || modifiers.shift);
         let mut select = response.clicked() && !multi_click;
         if multi_click {
             if modifiers.shift {
@@ -375,14 +397,25 @@ impl<T: PartialEq + Clone> TreeUi<'_, T> {
         }
         if response.has_focus() {
             self.shared.focused = true;
-            if ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))) {
+            if ui.input(|i| {
+                i.events
+                    .iter()
+                    .any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))
+            }) {
                 ui.data_mut(|d| d.insert_temp(pointer_focus_id, false));
             }
             ui.memory_mut(|m| {
-                m.set_focus_lock_filter(response.id, EventFilter { horizontal_arrows: true, ..Default::default() })
+                m.set_focus_lock_filter(
+                    response.id,
+                    EventFilter {
+                        horizontal_arrows: true,
+                        ..Default::default()
+                    },
+                )
             });
             if let Some(state) = folder.as_deref_mut() {
-                let (open, close) = ui.input(|i| (i.key_pressed(Key::ArrowRight), i.key_pressed(Key::ArrowLeft)));
+                let (open, close) =
+                    ui.input(|i| (i.key_pressed(Key::ArrowRight), i.key_pressed(Key::ArrowLeft)));
                 if open != close && state.is_open() != open {
                     state.set_open(open);
                     ui.request_repaint();
@@ -422,12 +455,21 @@ impl<T: PartialEq + Clone> TreeUi<'_, T> {
         if is_selected || response.hovered() {
             p.rect_filled(rect, t.radius_md(), t.accent);
         }
-        let fg = if is_selected { t.accent_foreground } else { t.foreground };
+        let fg = if is_selected {
+            t.accent_foreground
+        } else {
+            t.foreground
+        };
         let mut x = rect.left() + 8.0;
         let cy = rect.center().y;
         if let Some(state) = folder.as_deref() {
             let openness = state.openness(ui.ctx());
-            paint_chevron(p, Pos2::new(x + 8.0, cy), (openness - 1.0) * std::f32::consts::FRAC_PI_2, t.muted_foreground);
+            paint_chevron(
+                p,
+                Pos2::new(x + 8.0, cy),
+                (openness - 1.0) * std::f32::consts::FRAC_PI_2,
+                t.muted_foreground,
+            );
         }
         x += 20.0;
         if self.icons {
@@ -439,7 +481,10 @@ impl<T: PartialEq + Clone> TreeUi<'_, T> {
             }
             x += 24.0;
         }
-        let text_rect = Rect::from_min_max(Pos2::new(x, rect.top()), Pos2::new(rect.right() - 8.0, rect.bottom()));
+        let text_rect = Rect::from_min_max(
+            Pos2::new(x, rect.top()),
+            Pos2::new(rect.right() - 8.0, rect.bottom()),
+        );
         let clip = text_rect.intersect(p.clip_rect());
         match content {
             Some(add_contents) => {
@@ -456,7 +501,13 @@ impl<T: PartialEq + Clone> TreeUi<'_, T> {
                 add_contents(&mut child);
             }
             None => {
-                p.with_clip_rect(clip).text(Pos2::new(x, cy), Align2::LEFT_CENTER, label, FontId::proportional(14.0), fg);
+                p.with_clip_rect(clip).text(
+                    Pos2::new(x, cy),
+                    Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(14.0),
+                    fg,
+                );
             }
         }
         let p = ui.painter();
@@ -470,16 +521,42 @@ impl<T: PartialEq + Clone> TreeUi<'_, T> {
 /// Lucide-like icons drawn on a 24-unit grid scaled to 16 px.
 fn icon_path(p: &Painter, center: Pos2, points: &[(f32, f32)], closed: bool, color: egui::Color32) {
     let s = 16.0 / 24.0;
-    let pts = points.iter().map(|&(x, y)| center + Vec2::new(x - 12.0, y - 12.0) * s).collect();
+    let pts = points
+        .iter()
+        .map(|&(x, y)| center + Vec2::new(x - 12.0, y - 12.0) * s)
+        .collect();
     let stroke = Stroke::new(1.3, color);
-    p.add(Shape::Path(if closed { PathShape::closed_line(pts, stroke) } else { PathShape::line(pts, stroke) }));
+    p.add(Shape::Path(if closed {
+        PathShape::closed_line(pts, stroke)
+    } else {
+        PathShape::line(pts, stroke)
+    }));
 }
 
 fn paint_folder_icon(p: &Painter, center: Pos2, color: egui::Color32) {
-    icon_path(p, center, &[(2.5, 4.0), (9.0, 4.0), (11.0, 7.0), (21.5, 7.0), (21.5, 20.0), (2.5, 20.0)], true, color);
+    icon_path(
+        p,
+        center,
+        &[
+            (2.5, 4.0),
+            (9.0, 4.0),
+            (11.0, 7.0),
+            (21.5, 7.0),
+            (21.5, 20.0),
+            (2.5, 20.0),
+        ],
+        true,
+        color,
+    );
 }
 
 fn paint_file_icon(p: &Painter, center: Pos2, color: egui::Color32) {
-    icon_path(p, center, &[(5.0, 2.0), (14.0, 2.0), (19.5, 7.5), (19.5, 22.0), (5.0, 22.0)], true, color);
+    icon_path(
+        p,
+        center,
+        &[(5.0, 2.0), (14.0, 2.0), (19.5, 7.5), (19.5, 22.0), (5.0, 22.0)],
+        true,
+        color,
+    );
     icon_path(p, center, &[(14.0, 2.0), (14.0, 7.5), (19.5, 7.5)], false, color);
 }

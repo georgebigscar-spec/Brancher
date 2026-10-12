@@ -1,7 +1,4 @@
-use egui::{
-    Color32, Context, CornerRadius, FontId, Frame, Id, Margin, Shadow, Stroke,
-    TextStyle,
-};
+use egui::{Color32, Context, CornerRadius, FontId, Frame, Id, Margin, Shadow, Stroke, TextStyle};
 
 /// Design tokens in the spirit of shadcn/ui's CSS variables (neutral base color).
 #[derive(Clone, Debug, PartialEq)]
@@ -228,12 +225,7 @@ impl Theme {
 /// Linear mix of two colors: `t = 0` gives `a`, `t = 1` gives `b`.
 pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Color32::from_rgba_unmultiplied(
-        l(a.r(), b.r()),
-        l(a.g(), b.g()),
-        l(a.b(), b.b()),
-        l(a.a(), b.a()),
-    )
+    Color32::from_rgba_unmultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
 }
 
 /// Paints the two-layer focus ring shadcn uses (`ring-[3px] ring-ring/50`).
@@ -245,5 +237,10 @@ pub fn paint_focus_ring(painter: &egui::Painter, rect: egui::Rect, radius: Corne
         Stroke::new(3.0, theme.ring_soft()),
         egui::StrokeKind::Outside,
     );
-    painter.rect_stroke(rect, radius, Stroke::new(1.0, theme.ring), egui::StrokeKind::Inside);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, theme.ring),
+        egui::StrokeKind::Inside,
+    );
 }
