@@ -14,7 +14,9 @@ pub use version::{GitVersion, MIN_GIT_VERSION};
 
 use std::path::{Path, PathBuf};
 
-use brancher_core::{Blame, Commit, DiffTarget, FileDiff, GitRef, Operation, Progress, RepoStatus, Stash};
+use brancher_core::{
+    Blame, Commit, DiffTarget, FileDiff, GitRef, Operation, Progress, Remote, RepoStatus, Stash,
+};
 
 /// Высокоуровневые операции поверх [`Runner`].
 #[derive(Debug, Clone)]
@@ -371,6 +373,63 @@ impl Git {
         on_progress: &mut dyn FnMut(Progress),
     ) -> Result<(), GitError> {
         self.run_progress(repo, &commands::remote::fetch_args(), cancel, on_progress)
+    }
+
+    pub fn fetch_remote(
+        &self,
+        repo: &Path,
+        remote: &str,
+        cancel: &CancelToken,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> Result<(), GitError> {
+        self.run_progress(
+            repo,
+            &commands::remote::fetch_remote_args(remote),
+            cancel,
+            on_progress,
+        )
+    }
+
+    pub fn remotes(&self, repo: &Path, cancel: &CancelToken) -> Result<Vec<Remote>, GitError> {
+        let args = commands::remote::list_args();
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self.runner.run(Some(repo), &args, None, cancel)?;
+        Ok(commands::remote::parse_list(&out.stdout_lossy()))
+    }
+
+    pub fn add_remote(
+        &self,
+        repo: &Path,
+        name: &str,
+        url: &str,
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        self.run_args(repo, &commands::remote::add_args(name, url), None, cancel)
+    }
+
+    /// Удаляет remote вместе с его remote-ветками и настройками upstream.
+    pub fn remove_remote(&self, repo: &Path, name: &str, cancel: &CancelToken) -> Result<(), GitError> {
+        self.run_args(repo, &commands::remote::remove_args(name), None, cancel)
+    }
+
+    /// Переименование (`new_name`) и новый URL (`url`); `None` — не менять.
+    pub fn edit_remote(
+        &self,
+        repo: &Path,
+        name: &str,
+        new_name: Option<&str>,
+        url: Option<&str>,
+        cancel: &CancelToken,
+    ) -> Result<(), GitError> {
+        let mut name = name;
+        if let Some(new) = new_name {
+            self.run_args(repo, &commands::remote::rename_args(name, new), None, cancel)?;
+            name = new;
+        }
+        if let Some(url) = url {
+            self.run_args(repo, &commands::remote::set_url_args(name, url), None, cancel)?;
+        }
+        Ok(())
     }
 
     pub fn pull(

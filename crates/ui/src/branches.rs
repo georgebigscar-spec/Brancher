@@ -1,4 +1,4 @@
-//! Ветки, remotes, теги и stash слева, их контекстные меню и диалог новой ветки.
+//! Ветки, remotes, теги и stash слева (remotes — в [`crate::remotes`]), их контекстные меню и диалог новой ветки.
 //! Двойной клик по ветке — переключиться на неё.
 
 use brancher_core::{branch_name_error, Action, Commit, GitRef, RefKind, RepoState};
@@ -34,15 +34,22 @@ fn open_new_branch(ctx: &Context, start: String, from: String) {
 
 pub fn refs(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
     egui::ScrollArea::vertical().id_salt("refs").show(ui, |ui| {
+        let current = repo.status.as_ref().and_then(|s| s.branch.as_deref());
         for (title, kind) in [
             ("Ветки", RefKind::LocalBranch),
             ("Remotes", RefKind::RemoteBranch),
             ("Теги", RefKind::Tag),
         ] {
-            ui.label(RichText::new(title).strong());
-            let current = repo.status.as_ref().and_then(|s| s.branch.as_deref());
-            for r in repo.refs.iter().filter(|r| r.kind == kind) {
-                ref_row(ui, r, current, actions);
+            if kind == RefKind::RemoteBranch {
+                let mut row_actions = vec![];
+                let mut row = |ui: &mut Ui, r: &GitRef| ref_row(ui, r, current, &mut row_actions);
+                crate::remotes::section(ui, repo, &mut row, actions);
+                actions.extend(row_actions);
+            } else {
+                ui.label(RichText::new(title).strong());
+                for r in repo.refs.iter().filter(|r| r.kind == kind) {
+                    ref_row(ui, r, current, actions);
+                }
             }
             ui.add_space(8.0);
         }

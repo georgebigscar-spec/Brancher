@@ -17,6 +17,7 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
                 }
                 emit(JobResult::Refs(git.refs(repo, cancel).map_err(Into::into)));
                 emit(JobResult::Stashes(git.stashes(repo, cancel).map_err(Into::into)));
+                emit(JobResult::Remotes(git.remotes(repo, cancel).map_err(Into::into)));
                 // Раскладка графа считается здесь, в worker-потоке, а не в кадре UI.
                 let history = git.log(repo, *history_limit, cancel).map(History::new);
                 emit(JobResult::History(history.map_err(Into::into)));
@@ -41,6 +42,14 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
             } => git.create_branch(repo, name, start, *checkout, cancel)?,
             Job::DeleteBranch(name) => git.delete_branch(repo, name, true, cancel)?,
             Job::Fetch => git.fetch(repo, cancel, &mut |p| emit(JobResult::Progress(p)))?,
+            Job::FetchRemote(name) => {
+                git.fetch_remote(repo, name, cancel, &mut |p| emit(JobResult::Progress(p)))?
+            }
+            Job::AddRemote { name, url } => git.add_remote(repo, name, url, cancel)?,
+            Job::RemoveRemote(name) => git.remove_remote(repo, name, cancel)?,
+            Job::EditRemote { name, new_name, url } => {
+                git.edit_remote(repo, name, new_name.as_deref(), url.as_deref(), cancel)?
+            }
             Job::Pull => git.pull(repo, cancel, &mut |p| emit(JobResult::Progress(p)))?,
             Job::Push { set_upstream } => {
                 let upstream = set_upstream.as_ref().map(|(r, b)| (r.as_str(), b.as_str()));
