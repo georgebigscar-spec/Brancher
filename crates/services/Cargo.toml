@@ -1,6 +1,6 @@
 [package]
 name = "brancher-services"
-description = "Очереди задач репозиториев и наблюдение за ФС; позже — auto-fetch, настройки, keyring, AI."
+description = "Очереди задач репозиториев, наблюдение за ФС, сохранение сессии; позже — auto-fetch, keyring, AI."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,4 +13,6 @@ name = "brancher_services"
 brancher-core.workspace = true
 brancher-git.workspace = true
 notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 syntect.workspace = true

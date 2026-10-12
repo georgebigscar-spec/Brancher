@@ -9,8 +9,9 @@
 
 use std::sync::Arc;
 
-use brancher_core::{apply_result, job_started, reduce, Action, AppState, Effect};
+use brancher_core::{apply_result, job_started, reduce, Action, AppState, Effect, Session};
 use brancher_git::Git;
+use brancher_services::session::{self, SessionStore};
 use brancher_services::Jobs;
 use brancher_ui::BrancherUi;
 
@@ -39,6 +40,10 @@ struct App {
     state: AppState,
     ui: BrancherUi,
     jobs: Option<Jobs>,
+    /// `None` — не нашлась папка настроек, сессия не сохраняется.
+    store: Option<SessionStore>,
+    /// Последняя отправленная на запись сессия.
+    saved: Session,
 }
 
 impl App {
@@ -56,12 +61,22 @@ impl App {
                 None
             }
         };
-        // Открыть репозиторий из аргумента командной строки: `brancher /path/to/repo`.
+        let path = session::default_path();
+        let mut restored = path.as_deref().map(session::load).unwrap_or_default();
+        // Папки, которые удалили или переместили, не открываем — останутся в «Недавних».
+        let active = restored.active.and_then(|i| restored.tabs.get(i).cloned());
+        restored.tabs.retain(|p| p.is_dir());
+        restored.active = active.and_then(|a| restored.tabs.iter().position(|p| *p == a));
         let mut app = Self {
             state,
             ui: BrancherUi::default(),
             jobs,
+            store: path.map(SessionStore::new),
+            saved: Session::default(),
         };
+        app.dispatch(Action::Restore(restored));
+        app.saved = app.state.session();
+        // Открыть репозиторий из аргумента командной строки: `brancher /path/to/repo`.
         if let Some(path) = std::env::args_os().nth(1) {
             app.dispatch(Action::OpenRepo(path.into()));
         }
@@ -102,6 +117,14 @@ impl eframe::App for App {
         // 2–3. Кадр и действия пользователя.
         for action in self.ui.show(ui, &self.state) {
             self.dispatch(action);
+        }
+        // 4. Сессия: вкладки, недавние и настройки пишутся в фоне при каждом изменении.
+        let session = self.state.session();
+        if session != self.saved {
+            if let Some(store) = &self.store {
+                store.save(session.clone());
+            }
+            self.saved = session;
         }
     }
 }
