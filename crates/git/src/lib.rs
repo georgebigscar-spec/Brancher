@@ -15,8 +15,8 @@ pub use version::{GitVersion, MIN_GIT_VERSION};
 use std::path::{Path, PathBuf};
 
 use brancher_core::{
-    Blame, Commit, DiffTarget, FileDiff, GitRef, Operation, Progress, RebaseAction, RebaseStep, Remote,
-    RepoStatus, Snapshot, Stash,
+    AbsorbReport, Blame, Commit, DiffTarget, FileDiff, GitRef, Operation, Progress, RebaseAction, RebaseStep,
+    Remote, RepoStatus, Snapshot, Stash,
 };
 
 /// Высокоуровневые операции поверх [`Runner`].
@@ -338,6 +338,126 @@ impl Git {
             },
         );
         self.interactive_rebase(repo, base, &plan, cancel)
+    }
+
+    /// Раскладывает проиндексированные фрагменты по коммитам текущей ветки, которые последними
+    /// меняли эти строки: fixup-коммит на каждый такой коммит и один interactive rebase.
+    /// Фрагменты, которые не удалось отнести к одному коммиту ветки, остаются в индексе.
+    pub fn absorb(&self, repo: &Path, cancel: &CancelToken) -> Result<AbsorbReport, GitError> {
+        use commands::absorb;
+        let run = |args: &[String], input: Option<&[u8]>| {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            self.runner.run(Some(repo), &args, input, cancel)
+        };
+        let status = self.status(repo, cancel)?;
+        let Some(head) = status.head else {
+            return Err(GitError::Stale("В репозитории ещё нет коммитов".into()));
+        };
+        let refs = run(&absorb::branch_refs_args(), None)?.stdout_lossy();
+        let input = absorb::candidates_input(status.branch.as_deref(), &refs);
+        let candidates =
+            absorb::parse_candidates(&run(&absorb::candidates_args(200), Some(input.as_bytes()))?.stdout);
+        let files = absorb::parse_diff(&run(&absorb::staged_diff_args(), None)?.stdout);
+        let total: usize = files.iter().map(|f| f.hunks.len()).sum();
+
+        // Владелец каждого фрагмента: индекс в `candidates` (0 — HEAD).
+        let mut owners: Vec<Vec<Option<usize>>> = Vec::new();
+        for f in &files {
+            let blame = absorb::parse_blame(&run(&absorb::blame_args(&f.path), None)?.stdout);
+            owners.push(
+                f.hunks
+                    .iter()
+                    .map(|h| {
+                        absorb::owner(h, &blame).and_then(|sha| candidates.iter().position(|c| c.id == sha))
+                    })
+                    .collect(),
+            );
+        }
+        // Цели от старых к новым.
+        let mut targets: Vec<usize> = owners.iter().flatten().flatten().copied().collect();
+        targets.sort_unstable_by(|a, b| b.cmp(a));
+        targets.dedup();
+        let hunks = owners.iter().flatten().flatten().count();
+        if targets.is_empty() {
+            return Err(GitError::Stale(
+                "Ни один проиндексированный фрагмент не удалось отнести к коммиту этой ветки: \
+                 строки менялись в разных коммитах или в коммитах, которые есть и в других ветках"
+                    .into(),
+            ));
+        }
+
+        // Fixup-коммиты цепочкой поверх HEAD. Дерево k-го — HEAD плюс фрагменты целей 1..=k,
+        // применённые одним патчем, чтобы номера строк совпадали с diff.
+        let git_dir = self.git_dir(repo, cancel)?;
+        let index = git_dir.join("brancher-absorb-index");
+        let mut tmp = self.clone();
+        tmp.runner
+            .env
+            .push(("GIT_INDEX_FILE".into(), index.clone().into_os_string()));
+        let tmp_run = |args: &[&str], input: Option<&[u8]>| tmp.runner.run(Some(repo), args, input, cancel);
+        let mut parent = head.clone();
+        let mut fixups = Vec::new();
+        let result = (|| {
+            tmp_run(&["read-tree", "HEAD"], None)?;
+            let mut applied = 0;
+            for (k, &t) in targets.iter().enumerate() {
+                let patch = absorb::build_patch(&files, |fi, hi| {
+                    owners[fi][hi].is_some_and(|o| targets[applied..=k].contains(&o))
+                });
+                applied = k + 1;
+                tmp_run(
+                    &["apply", "--cached", "--unidiff-zero", "-"],
+                    Some(patch.as_bytes()),
+                )?;
+                let tree = tmp_run(&["write-tree"], None)?.stdout_lossy().trim().to_owned();
+                let msg = format!("fixup! {}", candidates[t].subject);
+                let commit = tmp_run(
+                    &["commit-tree", &tree, "-p", &parent, "-F", "-"],
+                    Some(msg.as_bytes()),
+                )?
+                .stdout_lossy()
+                .trim()
+                .to_owned();
+                fixups.push((t, commit.clone(), msg));
+                parent = commit;
+            }
+            Ok::<_, GitError>(())
+        })();
+        let _ = std::fs::remove_file(&index);
+        result?;
+        self.runner.run(
+            Some(repo),
+            &["update-ref", "-m", "brancher: absorb", "HEAD", &parent, &head],
+            None,
+            cancel,
+        )?;
+
+        // План: коммиты от самой старой цели до старого HEAD, fixup сразу после своей цели.
+        let oldest = targets[0];
+        let mut steps = Vec::new();
+        for i in (0..=oldest).rev() {
+            let c = &candidates[i];
+            steps.push(RebaseStep {
+                action: RebaseAction::Pick,
+                commit: c.id.clone(),
+                subject: c.subject.clone(),
+                message: None,
+            });
+            for (_, id, msg) in fixups.iter().filter(|(t, ..)| *t == i) {
+                steps.push(RebaseStep {
+                    action: RebaseAction::Fixup,
+                    commit: id.clone(),
+                    subject: msg.clone(),
+                    message: None,
+                });
+            }
+        }
+        self.interactive_rebase(repo, candidates[oldest].parent.as_deref(), &steps, cancel)?;
+        Ok(AbsorbReport {
+            hunks,
+            commits: targets.len(),
+            left: total - hunks,
+        })
     }
 
     /// Убирает файл из последнего коммита; его изменения остаются в рабочей копии.

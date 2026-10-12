@@ -110,6 +110,14 @@ pub struct Snapshot {
     pub title: String,
 }
 
+/// Итог absorb: сколько фрагментов ушло в сколько коммитов и сколько осталось в индексе.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AbsorbReport {
+    pub hunks: usize,
+    pub commits: usize,
+    pub left: usize,
+}
+
 /// Remote репозитория из `git remote -v`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Remote {

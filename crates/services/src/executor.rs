@@ -115,6 +115,7 @@ pub fn execute(git: &Git, repo: &Path, job: &Job, cancel: &CancelToken, emit: &m
                 git.amend_into(repo, commit, base.as_deref(), steps, cancel)?
             }
             Job::UncommitFile(path) => git.uncommit_file(repo, path, cancel)?,
+            Job::Absorb => emit(JobResult::Absorbed(git.absorb(repo, cancel)?)),
             Job::Snapshots => emit(JobResult::Snapshots(
                 git.snapshots(repo, OPLOG_LIMIT, cancel).map_err(Into::into),
             )),

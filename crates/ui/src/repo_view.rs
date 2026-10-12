@@ -311,6 +311,17 @@ fn changes(ui: &mut Ui, repo: &RepoState, actions: &mut Vec<Action>) {
         if !staged.is_empty() && ui.small_button("Unstage all").clicked() {
             actions.push(Action::UnstageAll);
         }
+        if !staged.is_empty()
+            && repo.operation().is_none()
+            && ui
+                .small_button("Absorb")
+                .on_hover_text(
+                    "Разложить проиндексированное по коммитам ветки, которые последними меняли эти строки",
+                )
+                .clicked()
+        {
+            actions.push(Action::Absorb);
+        }
     });
     file_list(ui, repo, "staged", &staged, true, actions);
 
